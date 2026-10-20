@@ -12,9 +12,13 @@ mod app_config;
 mod local_media;
 mod mediahub;
 mod message_bus;
+mod paths;
 mod plugin_http;
 mod smtc;
 mod themepack;
+mod tray;
+#[cfg(target_os = "windows")]
+mod thumbbar;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -205,11 +209,7 @@ fn ignore_mouse_event(app: AppHandle, window_label: String, ignore: bool) -> Res
 #[tauri::command]
 fn get_global_context(app: AppHandle, window: tauri::WebviewWindow) -> serde_json::Value {
     let app_handle = &app;
-    let data_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let data_dir = paths::data_dir(app_handle).to_string_lossy().to_string();
     let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
     let download_dir = app_handle
         .path()
@@ -239,6 +239,134 @@ fn get_global_context(app: AppHandle, window: tauri::WebviewWindow) -> serde_jso
     })
 }
 
+/// 全局快捷键注册（阶段5）：shortcut 为 Electron 风格 join("+")，如 "Control+Alt+ArrowUp"
+fn normalize_shortcut(shortcut: &str) -> String {
+    shortcut.replace("Control", "Ctrl")
+}
+
+#[tauri::command]
+fn register_global_shortcut(app: AppHandle, shortcut: String, command: String) -> Result<bool, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let normalized = normalize_shortcut(&shortcut);
+    let gs = app.global_shortcut();
+    let app_cb = app.clone();
+    gs.on_shortcut(normalized.as_str(), move |_app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            message_bus::send_command(&app_cb, &command, serde_json::Value::Null);
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn unregister_global_shortcut(app: AppHandle, shortcut: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let normalized = normalize_shortcut(&shortcut);
+    let _ = app.global_shortcut().unregister(normalized.as_str());
+    Ok(())
+}
+
+/// 启动时按配置注册全部全局快捷键（对应原版 registerAllGlobalShortCuts）
+fn setup_global_shortcuts(app: tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(shortcuts) = app_config::get_config(&app, "shortCut.shortcuts") {
+        if let Some(obj) = shortcuts.as_object() {
+            let command_map: std::collections::HashMap<String, String> = [
+                ("play/pause", "TogglePlayerState"),
+                ("skip-next", "SkipToNext"),
+                ("skip-previous", "SkipToPrevious"),
+                ("volume-down", "VolumeDown"),
+                ("volume-up", "VolumeUp"),
+                ("toggle-desktop-lyric", "ToggleDesktopLyric"),
+                ("like/dislike", "ToggleFavorite"),
+                ("toggle-main-window-visible", "ToggleMainWindowVisible"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            for (key, cfg) in obj {
+                let global = cfg.get("global").and_then(|g| g.as_array());
+                if let Some(global) = global {
+                    let parts: Vec<String> = global.iter().filter_map(|p| p.as_str().map(String::from)).collect();
+                    if !parts.is_empty() {
+                        if let Some(command) = command_map.get(key) {
+                            let _ = register_global_shortcut(app.clone(), parts.join("+"), command.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 深链：musicfree://install/... → 主窗口事件（前端复用原解析逻辑安装）
+fn setup_deep_link(app: tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::Emitter;
+    use tauri_plugin_deep_link::DeepLinkExt;
+    let handle = app.clone();
+    let _ = app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            let _ = handle.emit("deep-link", url.to_string());
+        }
+    });
+    Ok(())
+}
+
+/// 数据目录（便携版支持：exe 旁 portable/ 优先）
+#[tauri::command]
+fn get_data_dir(app: AppHandle) -> String {
+    paths::data_dir(&app).to_string_lossy().to_string()
+}
+
+/// 更新检查（阶段5）：拉 version.json 比对（对应原 utils/main checkUpdate）
+#[tauri::command]
+async fn check_update(app: AppHandle) -> serde_json::Value {
+    let current = app.package_info().version.to_string();
+    let mut result = serde_json::json!({ "version": current });
+    let sources = [
+        "https://gitee.com/maotoumao/MusicFreeDesktop/raw/master/release/version.json",
+        "https://raw.githubusercontent.com/maotoumao/MusicFreeDesktop/master/release/version.json",
+        "https://cdn.jsdelivr.net/gh/maotoumao/MusicFreeDesktop@master/release/version.json",
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    for source in sources {
+        if let Ok(resp) = client.get(source).send().await {
+            if let Ok(info) = resp.json::<serde_json::Value>().await {
+                let remote_version = info.get("version").and_then(|v| v.as_str()).unwrap_or("");
+                if version_gt(remote_version, &current) {
+                    result["update"] = info;
+                    return result;
+                }
+            }
+        }
+    }
+    result
+}
+
+/// 简化 semver 比较：a > b
+fn version_gt(a: &str, b: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|p| p.parse::<u64>().ok())
+            .collect()
+    };
+    let (va, vb) = (parse(a), parse(b));
+    for i in 0..va.len().max(vb.len()) {
+        let x = va.get(i).copied().unwrap_or(0);
+        let y = vb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -246,6 +374,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 二次启动：唤起主窗口（对应 Electron 版 second-instance）
             if let Some(win) = app.get_webview_window("main") {
@@ -266,6 +396,8 @@ pub fn run() {
             controls: None,
             last_playing: false,
         }))
+        .manage(std::sync::Mutex::new(tray::TrayState::default()))
+        .manage(thumbbar::setup_state())
         .register_asynchronous_uri_scheme_protocol("mediahub", move |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -284,6 +416,19 @@ pub fn run() {
                         &app,
                         serde_json::json!({"private.mainWindowSize": {"width": logical.width, "height": logical.height}}),
                     );
+                }
+            } else if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 关闭行为（阶段5）：normal.closeBehavior=minimize → 隐藏到托盘
+                if label == "main" {
+                    let behavior = app_config::get_config(
+                        window.app_handle(),
+                        "normal.closeBehavior",
+                    );
+                    let behavior = behavior.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_else(|| "exit_app".to_string());
+                    if behavior == "minimize" {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
                 }
             } else if let tauri::WindowEvent::Moved(pos) = event {
                 if label == "lrc" || label == "minimode" {
@@ -331,11 +476,29 @@ pub fn run() {
             themepack::theme_uninstall,
             themepack::theme_read_file,
             themepack::theme_read_file_base64,
+            tray::tray_update_texts,
+            register_global_shortcut,
+            unregister_global_shortcut,
+            get_data_dir,
+            check_update,
         ])
         .setup(|app| {
             app_config::setup(&app.handle())?;
             let smtc_state = smtc::setup(&app.handle());
             *app.state::<std::sync::Mutex<smtc::SmtcState>>().lock().unwrap() = smtc_state;
+            // 托盘 + thumbar（阶段5）
+            if let Some(tray_icon) = tray::setup(app.handle()) {
+                {
+                    let tray_state = app.state::<std::sync::Mutex<tray::TrayState>>();
+                    let Ok(mut guard) = tray_state.lock() else { return Ok(()) };
+                    guard.tray = Some(tray_icon);
+                }
+            }
+            thumbbar::init(&app.handle());
+            // 深链：musicfree://install → 转发主窗口（前端复用原解析逻辑安装）
+            setup_deep_link(app.handle().clone())?;
+            // 启动时按配置注册全局快捷键（对应原版 shortCut.setup）
+            setup_global_shortcuts(app.handle().clone())?;
             // 主窗口恢复记忆大小
             if let Some(main) = app.get_webview_window("main") {
                 if let Some(size) = app_config::get_config(&app.handle(), "private.mainWindowSize") {

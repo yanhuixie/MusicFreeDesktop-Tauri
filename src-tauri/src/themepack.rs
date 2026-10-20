@@ -9,14 +9,10 @@ use base64::Engine;
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 fn themes_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("musicfree-themepacks");
+    let dir = crate::paths::data_dir(app).join("musicfree-themepacks");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

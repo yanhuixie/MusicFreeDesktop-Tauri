@@ -84,7 +84,7 @@ fn migrate_old_config(old: Map<String, Value>) -> Map<String, Value> {
 }
 
 pub fn setup(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = app.path().app_data_dir()?;
+    let data_dir = crate::paths::data_dir(app);
     fs::create_dir_all(&data_dir)?;
     let config_path = data_dir.join("config.json");
 

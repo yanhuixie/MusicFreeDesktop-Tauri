@@ -3,15 +3,61 @@ import { IAppConfig } from "@/types/app-config";
 import { shortCutKeys, shortCutKeysCommands } from "@/common/constant";
 import hotkeys from "hotkeys-js";
 import messageBus from "@shared/message-bus/renderer/main";
+import { invoke } from "@tauri-apps/api/core";
 
 type IShortCutKeys = keyof IAppConfig["shortCut.shortcuts"];
 
-interface IMod {
-    registerGlobalShortCut: (key: IShortCutKeys, shortCut: string[]) => void;
-    unregisterGlobalShortCut: (key: IShortCutKeys) => void;
-}
-
-const mod = window["@shared/short-cut" as any] as unknown as IMod;
+/**
+ * Tauri 版 short-cut renderer（阶段5）
+ * 应用内快捷键（hotkeys-js）原样保留；
+ * 全局快捷键改为 invoke Rust（tauri-plugin-global-shortcut，注册时携带命令映射），
+ * 配置持久化逻辑与原版一致。
+ */
+const mod = {
+    registerGlobalShortCut(key: IShortCutKeys, shortCut: string[]) {
+        if (!shortCut?.length) {
+            return;
+        }
+        const prevConfig = AppConfig.getConfig("shortCut.shortcuts");
+        const prev = prevConfig?.[key]?.global;
+        if (prev?.length) {
+            invoke("unregister_global_shortcut", { shortcut: prev.join("+") }).catch(() => {});
+        }
+        invoke("register_global_shortcut", {
+            shortcut: shortCut.join("+"),
+            command: shortCutKeysCommands[key],
+        })
+            .then((ok) => {
+                const newConfig = {
+                    ...(prevConfig || ({} as any)),
+                    [key]: {
+                        ...(prevConfig?.[key] || {}),
+                        global: ok ? shortCut : null,
+                    },
+                };
+                AppConfig.setConfig({
+                    "shortCut.shortcuts": newConfig,
+                });
+            })
+            .catch(() => {});
+    },
+    unregisterGlobalShortCut(key: IShortCutKeys) {
+        const prevShortCut = AppConfig.getConfig("shortCut.shortcuts")?.[key]?.global;
+        if (prevShortCut?.length) {
+            invoke("unregister_global_shortcut", { shortcut: prevShortCut.join("+") }).catch(() => {});
+            const prevConfig = AppConfig.getConfig("shortCut.shortcuts");
+            AppConfig.setConfig({
+                "shortCut.shortcuts": {
+                    ...(prevConfig || ({} as any)),
+                    [key]: {
+                        ...(prevConfig?.[key] || {}),
+                        global: null,
+                    },
+                },
+            });
+        }
+    },
+};
 
 const originalHotkeysFilter = hotkeys.filter;
 

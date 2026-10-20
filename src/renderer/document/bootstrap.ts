@@ -31,6 +31,8 @@ export default async function () {
         trackPlayer.setup(),
     ]);
     await setupI18n();
+    setupTrayTexts();
+    setupDeepLinkListener();
     shortCut.setup();
     dropHandler();
     clearDefaultBehavior();
@@ -283,4 +285,65 @@ async function setupDeviceChange() {
         }
         devices = newDevices;
     };
+}
+
+/** 托盘文案推送（阶段5：i18n 在前端，Rust 托盘经 command 取文案） */
+const trayTextKeys = [
+    "media.unknown_title",
+    "main.no_playing_music",
+    "media.music_state_pause",
+    "media.music_state_play",
+    "media.music_state_play_or_pause",
+    "main.previous_music",
+    "main.next_music",
+    "media.music_repeat_mode",
+    "media.music_repeat_mode_loop",
+    "media.music_repeat_mode_queue",
+    "media.music_repeat_mode_shuffle",
+    "app_header.settings",
+    "common.exit",
+    "media.media_platform",
+];
+
+function setupTrayTexts() {
+    const push = () => {
+        import("@tauri-apps/api/core").then(({ invoke }) => {
+            import("@/shared/i18n/renderer").then(({ i18n }) => {
+                const texts: Record<string, string> = {};
+                for (const key of trayTextKeys) {
+                    texts[key] = i18n.t(key);
+                }
+                invoke("tray_update_texts", { texts }).catch(() => {});
+            });
+        });
+    };
+    push();
+    // 语言变化重推
+    AppConfig.onConfigUpdate((patch) => {
+        if ("normal.language" in patch) {
+            push();
+        }
+    });
+}
+
+/** 深链监听（阶段5：Rust 转发 musicfree:// → 前端复用原解析逻辑安装插件） */
+function setupDeepLinkListener() {
+    import("@tauri-apps/api/event").then(({ listen }) => {
+        listen<string>("deep-link", (evt) => {
+            const url = evt.payload;
+            try {
+                const urlObj = new URL(url);
+                if (urlObj.protocol === "musicfree:" && urlObj.hostname === "install") {
+                    const pluginUrlStr =
+                        urlObj.pathname.slice(1) || urlObj.searchParams.get("plugin");
+                    const pluginUrls = (pluginUrlStr || "").split(",").map(decodeURIComponent);
+                    pluginUrls.forEach((it) => {
+                        PluginManager.installPluginFromRemote(it).catch(() => {});
+                    });
+                }
+            } catch {
+                // pass
+            }
+        });
+    });
 }

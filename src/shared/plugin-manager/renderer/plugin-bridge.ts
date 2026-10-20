@@ -153,7 +153,8 @@ async function getPluginDir(): Promise<string> {
     if (pluginDir) {
         return pluginDir;
     }
-    const userData = (await appDataDir()) || "";
+    // 便携版支持（阶段5）：exe 旁 portable/ 目录优先
+    const userData = (await invoke<string>("get_data_dir")) || "";
     pluginDir = joinPath(userData, "musicfree-plugins");
     try {
         await pluginFs.mkdir(pluginDir, { recursive: true });

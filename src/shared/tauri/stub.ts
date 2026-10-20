@@ -7,7 +7,6 @@
  * 本文件现在仅注入仍走 window 命名空间的模块：
  * - path polyfill（node path 的 web 等价物，local-music/downloader 等使用）
  * - @shared/service-manager（阶段3）
- * - @shared/short-cut（阶段5 tauri-plugin-global-shortcut）
  */
 
 const win = window as any;
@@ -60,15 +59,3 @@ win["@shared/service-manager"] = {
         return undefined;
     },
 };
-
-/**************************** @shared/short-cut ****************************/
-win["@shared/short-cut"] = {
-    registerGlobalShortCut(_key: string, _shortCut: string[]) {
-        /* 阶段5：tauri-plugin-global-shortcut */
-    },
-    unregisterGlobalShortCut(_key: string) {
-        /* 阶段5 */
-    },
-};
-
-export {};

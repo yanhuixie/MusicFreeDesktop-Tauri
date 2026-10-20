@@ -37,6 +37,9 @@
     "fs:allow-remove",
     "fs:allow-mkdir",
     "fs:allow-read-dir",
-    "fs:allow-exists"
+    "fs:allow-exists",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered"
   ]
 }

@@ -35,6 +35,10 @@ pub fn sync_app_state(app: AppHandle, patch: Value) {
             let _ = win.emit("app-state-changed", &patch);
         }
     }
+    // 托盘 / thumbar 随播放状态重建（内部有签名比对节流）
+    crate::tray::rebuild_if_needed(&app);
+    #[cfg(target_os = "windows")]
+    crate::thumbbar::update_on_state_change(&app);
 }
 
 /// 供托盘等 Rust 模块读取当前状态

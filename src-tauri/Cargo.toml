@@ -17,7 +17,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
@@ -26,7 +26,18 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-fs = "2"
-reqwest = { version = "0.12", features = ["stream", "cookies"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-deep-link = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+    "Win32_Foundation",
+] }
+reqwest = { version = "0.12", features = ["stream", "cookies", "json"] }
 tokio = { version = "1", features = ["fs", "io-util"] }
 futures-util = "0.3"
 base64 = "0.22"

@@ -84,8 +84,12 @@ const app = {
         return (await resolver()) || "";
     },
     async checkUpdate(): Promise<ICommon.IUpdateInfo | null> {
-        // 阶段5：Rust reqwest 比对 version.json
-        return { version: "0.0.8" };
+        // Rust reqwest 拉取 version.json 比对（阶段5）
+        try {
+            return await invoke<ICommon.IUpdateInfo>("check_update");
+        } catch {
+            return { version: "0.0.8" };
+        }
     },
     async getCacheSize(): Promise<number> {
         // 阶段6：WebView2 缓存目录统计
