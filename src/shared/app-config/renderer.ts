@@ -1,25 +1,21 @@
 import { IAppConfig } from "@/types/app-config";
 import defaultAppConfig from "@shared/app-config/default-app-config";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
-
-interface IMod {
-    syncConfig(): Promise<IAppConfig>;
-
-    setConfig(config: IAppConfig): void;
-
-    onConfigUpdate(callback: (config: IAppConfig) => void): void;
-
-    reset(): void;
-}
-
-const mod = window["@shared/app-config" as any] as unknown as IMod;
-
+/**
+ * Tauri 版 app-config renderer（阶段1）
+ * 原实现经 preload 暴露的 window["@shared/app-config"] IPC；
+ * 现直接 invoke Rust command + listen "app-config:update" 事件，导出签名不变。
+ */
 class AppConfig {
     private config: IAppConfig = {};
 
     public initialized = false;
 
     private updateCallbacks: Set<(patch: IAppConfig, config: IAppConfig) => void> = new Set();
+
+    private unListen: (() => void) | null = null;
 
     private notifyCallbacks(patch: IAppConfig) {
         for (const callback of this.updateCallbacks) {
@@ -29,10 +25,10 @@ class AppConfig {
 
     async setup() {
         this.initialized = true;
-        this.config = await mod.syncConfig();
+        this.config = await invoke("sync_app_config");
         this.notifyCallbacks(this.config);
-
-        mod.onConfigUpdate((patch) => {
+        this.unListen = await listen<IAppConfig>("app-config:update", (evt) => {
+            const patch = evt.payload || {};
             this.config = { ...defaultAppConfig, ...this.config, ...patch };
             this.notifyCallbacks(patch);
         });
@@ -55,11 +51,11 @@ class AppConfig {
     }
 
     public setConfig(data: IAppConfig) {
-        mod.setConfig(data);
+        invoke("set_app_config", { patch: data });
     }
 
     public reset() {
-        mod.reset();
+        invoke("reset_app_config");
         this.config = defaultAppConfig;
         this.notifyCallbacks(this.config);
     }

@@ -16,6 +16,27 @@
     "core:window:allow-unmaximize",
     "core:window:allow-start-dragging",
     "core:event:default",
-    "core:webview:default"
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:event:allow-listen",
+    "core:webview:default",
+    "log:default",
+    "dialog:default",
+    "opener:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "**" }
+      ]
+    },
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-read-file",
+    "fs:allow-write-file",
+    "fs:allow-stat",
+    "fs:allow-remove",
+    "fs:allow-mkdir",
+    "fs:allow-read-dir",
+    "fs:allow-exists"
   ]
 }

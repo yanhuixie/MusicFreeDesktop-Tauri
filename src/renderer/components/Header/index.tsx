@@ -13,6 +13,7 @@ import useAppConfig from "@/hooks/useAppConfig";
 import AppConfig from "@shared/app-config/renderer";
 import { appUtil, appWindowUtil } from "@shared/utils/renderer";
 import { musicDetailShownStore } from "@renderer/components/MusicDetail/store";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export default function AppHeader() {
     const navigate = useNavigate();
@@ -42,7 +43,20 @@ export default function AppHeader() {
     }
 
     return (
-        <div className="header-container">
+        <div
+            className="header-container"
+            onMouseDown={(e) => {
+                // Tauri 迁移：无边框窗口标题栏拖拽（原 Electron win32 hook 全窗口拖拽）
+                if (e.button !== 0) {
+                    return;
+                }
+                const target = e.target as HTMLElement;
+                if (target.closest?.("button, input, [role=button], #header-search, .header-navigator")) {
+                    return;
+                }
+                getCurrentWindow().startDragging();
+            }}
+        >
             <div className="left-part">
                 <div className="logo">
                     <SvgAsset iconName="logo"></SvgAsset>

@@ -1,8 +1,9 @@
-// Tauri 迁移：必须最先执行，注入 Electron preload 等价的 window["@shared/*"] 桩
+// Tauri 迁移：必须最先执行，注入尚未迁移模块的 window["@shared/*"] 桩
 import "@shared/tauri/stub";
 import ReactDOM from "react-dom/client";
 import App from "../app";
 import { localPluginName, toastDuration } from "@/common/constant";
+import { setupGlobalContext } from "@shared/global-context/renderer";
 
 // Tauri 迁移：Electron 版由 window-manager 设置初始 hash（收藏歌单页），此处对齐
 if (!location.hash) {
@@ -27,15 +28,17 @@ import AppConfig from "@shared/app-config/renderer";
 import trackPlayer from "../core/track-player";
 
 logger.logPerf("Create Bundle");
-bootstrap().then(() => {
-    logger.logPerf("Bundle Bootstrap Ready");
-    ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary
-        FallbackComponent={Fallback} onReset={() => {
-            // 删除软件配置
-            AppConfig.reset();
-            trackPlayer.reset();
-        }}><Root></Root></ErrorBoundary>);
-});
+setupGlobalContext()
+    .then(bootstrap)
+    .then(() => {
+        logger.logPerf("Bundle Bootstrap Ready");
+        ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary
+            FallbackComponent={Fallback} onReset={() => {
+                // 删除软件配置
+                AppConfig.reset();
+                trackPlayer.reset();
+            }}><Root></Root></ErrorBoundary>);
+    });
 
 function Root() {
     return (
