@@ -92,11 +92,11 @@ const app = {
         }
     },
     async getCacheSize(): Promise<number> {
-        // 阶段6：WebView2 缓存目录统计
-        return 0;
+        // WebView2 缓存目录统计（阶段6）
+        return (await invoke<number>("get_cache_size").catch(() => 0)) || 0;
     },
     clearCache() {
-        // 阶段6
+        invoke("clear_cache").catch(() => {});
     },
 };
 

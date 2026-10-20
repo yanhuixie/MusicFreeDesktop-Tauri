@@ -152,6 +152,19 @@ pub fn set_config(app: &AppHandle, patch: Value) {
             log::warn!("写入配置文件失败");
         }
     }
+    // 歌词窗联动（阶段6，对齐原版 window-manager 的 onConfigUpdated）
+    if let Some(font_size) = patch_map.get("lyric.fontSize").and_then(|v| v.as_f64()) {
+        if let Some(win) = app.get_webview_window("lrc") {
+            let height = (60.0 + font_size * 2.0).clamp(92.0, 240.0);
+            let width = win.inner_size().map(|s| s.width as f64).unwrap_or(920.0);
+            let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
+        }
+    }
+    if let Some(locked) = patch_map.get("lyric.lockLyric").and_then(|v| v.as_bool()) {
+        if let Some(win) = app.get_webview_window("lrc") {
+            let _ = win.set_ignore_cursor_events(locked);
+        }
+    }
     emit_config_update(app, &Value::Object(patch_map));
 }
 

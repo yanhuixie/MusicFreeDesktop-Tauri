@@ -34,9 +34,14 @@ fn create_lyric_window(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window("lrc").is_some() {
         return Ok(());
     }
+    // 字号联动高度（对齐原版 evaluateWindowHeight：60 + fontSize * 2，clamp [92,240]）
+    let font_size = app_config::get_config(app, "lyric.fontSize")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(54.0);
+    let init_height = ((60.0 + font_size * 2.0).clamp(LRC_MIN_HEIGHT, LRC_MAX_HEIGHT)) as f64;
     let builder = WebviewWindowBuilder::new(app, "lrc", WebviewUrl::App("lrc.html".into()))
         .title("MusicFree Lyric")
-        .inner_size(LRC_MIN_WIDTH, LRC_MIN_HEIGHT)
+        .inner_size(LRC_MIN_WIDTH, init_height)
         .min_inner_size(LRC_MIN_WIDTH, LRC_MIN_HEIGHT)
         .max_inner_size(16384.0, LRC_MAX_HEIGHT)
         .resizable(true)
@@ -45,12 +50,21 @@ fn create_lyric_window(app: &AppHandle) -> tauri::Result<()> {
         .skip_taskbar(true)
         .always_on_top(true)
         .visible(true);
-    // 恢复记忆位置
+    // 恢复记忆位置（多显示器边界归一化：位置完全在所有显示器之外时丢弃）
     let builder = if let Some(pos) = app_config::get_config(app, "private.lyricWindowPosition") {
         let x = pos.get("x").and_then(|v| v.as_f64());
         let y = pos.get("y").and_then(|v| v.as_f64());
         if let (Some(x), Some(y)) = (x, y) {
-            builder.position(x, y)
+            if position_visible(app, x, y) {
+                builder.position(x, y)
+            } else {
+                // 显示器外：位置持久化无效，回到默认并清除记忆
+                app_config::set_config(
+                    app,
+                    serde_json::json!({"private.lyricWindowPosition": null}),
+                );
+                builder
+            }
         } else {
             builder
         }
@@ -63,7 +77,31 @@ fn create_lyric_window(app: &AppHandle) -> tauri::Result<()> {
         let w = monitor.size().width as f64 / monitor.scale_factor();
         let _ = win.set_max_size(Some(tauri::Size::Logical(tauri::LogicalSize::new(w, LRC_MAX_HEIGHT))));
     }
+    // 锁定态初始穿透（对齐原版 ready-to-show 时的 setIgnoreMouseEvents）
+    let locked = app_config::get_config(app, "lyric.lockLyric")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if locked {
+        let _ = win.set_ignore_cursor_events(true);
+    }
     Ok(())
+}
+
+/// 位置是否落在任一显示器范围内（含 50px 容差）
+fn position_visible(app: &AppHandle, x: f64, y: f64) -> bool {
+    if let Ok(monitors) = app.available_monitors() {
+        for m in monitors {
+            let scale = m.scale_factor();
+            let size = m.size();
+            let pos = m.position();
+            let (mw, mh) = (size.width as f64 / scale, size.height as f64 / scale);
+            let (mx, my) = (pos.x as f64 / scale, pos.y as f64 / scale);
+            if x >= mx - 50.0 && x <= mx + mw + 50.0 && y >= my - 50.0 && y <= my + mh + 50.0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn create_minimode_window(app: &AppHandle) -> tauri::Result<()> {
@@ -319,6 +357,58 @@ fn get_data_dir(app: AppHandle) -> String {
     paths::data_dir(&app).to_string_lossy().to_string()
 }
 
+/// WebView2 缓存目录（阶段6：缓存清理）
+fn webview_cache_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok().map(std::path::PathBuf::from)?;
+    // WebView2 用户数据目录由 wry 管理（%LOCALAPPDATA%/{bundleIdentifier}.WebView2）
+    let dir = base
+        .join("fun.upup.musicfree.WebView2")
+        .join("EBWebView")
+        .join("Default")
+        .join("Cache");
+    dir.is_dir().then_some(dir)
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+#[tauri::command]
+fn get_cache_size(app: AppHandle) -> u64 {
+    webview_cache_dir(&app)
+        .map(|d| dir_size(&d))
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+fn clear_cache(app: AppHandle) -> Result<(), String> {
+    // WebView2 运行中的部分缓存文件被占用，尽力删除（与原 session.clearChat 语义近似）
+    if let Some(dir) = webview_cache_dir(&app) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let _ = std::fs::remove_dir_all(&p);
+                } else {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 更新检查（阶段5）：拉 version.json 比对（对应原 utils/main checkUpdate）
 #[tauri::command]
 async fn check_update(app: AppHandle) -> serde_json::Value {
@@ -480,6 +570,8 @@ pub fn run() {
             register_global_shortcut,
             unregister_global_shortcut,
             get_data_dir,
+            get_cache_size,
+            clear_cache,
             check_update,
         ])
         .setup(|app| {

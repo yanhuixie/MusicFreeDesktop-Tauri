@@ -9,6 +9,13 @@
     "beforeBuildCommand": "npm run build:vite",
     "frontendDist": "../dist"
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["musicfree"]
+      }
+    }
+  },
   "app": {
     "withGlobalTauri": false,
     "windows": [
