@@ -55,52 +55,65 @@ export default async function () {
 }
 
 function dropHandler() {
-    document.addEventListener("drop", async (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        console.log(event);
+    document.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+    document.addEventListener("drop", (e) => {
+        // 阻止浏览器默认打开文件行为（实际路径处理走 Tauri 拖放事件）
+        e.preventDefault();
+        e.stopPropagation();
+    });
 
-        const validMusicList: IMusic.IMusicItem[] = [];
-        for (const f of event.dataTransfer.files) {
-            if (f.type === "" && (await fsUtil.isFolder(f.path))) {
+    // Tauri 迁移（阶段4）：File.path → onDragDropEvent 原生路径
+    import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
+        getCurrentWebview().onDragDropEvent((event) => {
+            if (event.payload.type !== "drop") {
+                return;
+            }
+            handleDroppedPaths(event.payload.paths);
+        });
+    });
+}
+
+async function handleDroppedPaths(paths: string[]) {
+    const validMusicList: IMusic.IMusicItem[] = [];
+    for (const path of paths) {
+        try {
+            if (await fsUtil.isFolder(path)) {
                 validMusicList.push(
                     ...(await PluginManager.callPluginDelegateMethod(
                         {
                             hash: localPluginHash,
                         },
                         "importMusicSheet",
-                        f.path,
+                        path,
                     )),
                 );
-            } else if (
-                supportLocalMediaType.some((postfix) => f.path.endsWith(postfix))
-            ) {
+            } else if (supportLocalMediaType.some((postfix) => path.endsWith(postfix))) {
                 validMusicList.push(
                     await PluginManager.callPluginDelegateMethod(
                         {
                             hash: localPluginHash,
                         },
                         "importMusicItem",
-                        f.path,
+                        path,
                     ),
                 );
-            } else if (f.path.endsWith(".mftheme")) {
+            } else if (path.endsWith(".mftheme")) {
                 // 主题包
-                const themeConfig = await ThemePack.installThemePack(f.path);
+                const themeConfig = await ThemePack.installThemePack(path);
                 if (themeConfig) {
                     await ThemePack.selectTheme(themeConfig);
                 }
             }
+        } catch {
+            /* 单个失败忽略 */
         }
-        if (validMusicList.length) {
-            trackPlayer.playMusicWithReplaceQueue(validMusicList);
-        }
-    });
-
-    document.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-    });
+    }
+    if (validMusicList.length) {
+        trackPlayer.playMusicWithReplaceQueue(validMusicList);
+    }
 }
 
 function clearDefaultBehavior() {

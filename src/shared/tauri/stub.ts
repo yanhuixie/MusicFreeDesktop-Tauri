@@ -6,7 +6,6 @@
  * message-bus / logger 的 renderer.ts 内部改为直接调用 @tauri-apps/api，
  * 本文件现在仅注入仍走 window 命名空间的模块：
  * - path polyfill（node path 的 web 等价物，local-music/downloader 等使用）
- * - @shared/themepack（阶段4 Rust zip 化）
  * - @shared/service-manager（阶段3）
  * - @shared/short-cut（阶段5 tauri-plugin-global-shortcut）
  */
@@ -49,31 +48,6 @@ win.path = {
         const base = p.replace(/\\/g, "/").split("/").pop() || "";
         const idx = base.lastIndexOf(".");
         return idx > 0 ? base.slice(idx) : "";
-    },
-};
-
-/**************************** @shared/themepack ****************************/
-win["@shared/themepack"] = {
-    async selectTheme(_themePack: any) {
-        /* 阶段4：Rust zip + web 注入 */
-    },
-    async initCurrentTheme(): Promise<any | null> {
-        return null;
-    },
-    async loadThemePacks(): Promise<any[]> {
-        return [];
-    },
-    async installThemePack(_path: string): Promise<any | null> {
-        return null;
-    },
-    async installRemoteThemePack(_url: string): Promise<any | null> {
-        throw new Error("not implemented before stage 4");
-    },
-    async uninstallThemePack(_themePack: any) {
-        /* 阶段4 */
-    },
-    replaceAlias(rawText: string) {
-        return rawText;
     },
 };
 

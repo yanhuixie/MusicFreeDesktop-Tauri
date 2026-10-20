@@ -9,10 +9,12 @@
 //! - 日志：tauri-plugin-log
 
 mod app_config;
+mod local_media;
 mod mediahub;
 mod message_bus;
 mod plugin_http;
 mod smtc;
+mod themepack;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -259,6 +261,7 @@ pub fn run() {
             config_path: std::path::PathBuf::new(),
         }))
         .manage(message_bus::setup())
+        .manage(local_media::setup_watcher_state())
         .manage(std::sync::Mutex::new(smtc::SmtcState {
             controls: None,
             last_playing: false,
@@ -315,6 +318,19 @@ pub fn run() {
             plugin_http::plugin_http_request,
             plugin_http::plugin_cookie_get,
             plugin_http::plugin_cookie_set,
+            local_media::parse_local_music_item,
+            local_media::parse_local_music_item_folder,
+            local_media::read_companion_lrc,
+            local_media::watch_local_dirs,
+            local_media::get_watched_dirs,
+            local_media::download_file,
+            themepack::theme_load_packs,
+            themepack::theme_init_current,
+            themepack::theme_install,
+            themepack::theme_install_remote,
+            themepack::theme_uninstall,
+            themepack::theme_read_file,
+            themepack::theme_read_file_base64,
         ])
         .setup(|app| {
             app_config::setup(&app.handle())?;

@@ -31,6 +31,12 @@ tokio = { version = "1", features = ["fs", "io-util"] }
 futures-util = "0.3"
 base64 = "0.22"
 souvlaki = "0.8"
+lofty = "0.22"
+chardetng = "0.1"
+encoding_rs = "0.8"
+notify = "8"
+zip = "2"
+md-5 = "0.10"
 
 [profile.release]
 codegen-units = 1

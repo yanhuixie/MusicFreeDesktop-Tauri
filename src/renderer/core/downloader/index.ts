@@ -4,7 +4,8 @@ import {
     isSameMedia,
     setInternalData,
 } from "@/common/media-util";
-import * as Comlink from "comlink";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { DownloadState, localPluginName } from "@/common/constant";
 import PQueue from "p-queue";
 import {
@@ -15,7 +16,7 @@ import {
     useDownloaded,
     useDownloadedMusicList,
 } from "./downloaded-sheet";
-import { getGlobalContext } from "@/shared/global-context/renderer";
+import { getGlobalContext } from "@shared/global-context/renderer";
 import Store from "@/common/store";
 import { useEffect, useState } from "react";
 import { DownloadEvts, ee } from "./ee";
@@ -33,20 +34,7 @@ export interface IDownloadStatus {
 const downloadingMusicStore = new Store<Array<IMusic.IMusicItem>>([]);
 const downloadingProgress = new Map<string, IDownloadStatus>();
 
-type ProxyMarkedFunction<T extends (...args: any) => void> = T &
-  Comlink.ProxyMarked;
-
 type IOnStateChangeFunc = (data: IDownloadStatus) => void;
-
-interface IDownloaderWorker {
-    downloadFile: (
-        mediaSource: IMusic.IMusicSource,
-        filePath: string,
-        onStateChange: ProxyMarkedFunction<IOnStateChangeFunc>
-    ) => Promise<void>;
-}
-
-let downloaderWorker: IDownloaderWorker;
 
 async function setupDownloader() {
     setupDownloaderWorker();
@@ -54,12 +42,6 @@ async function setupDownloader() {
 }
 
 function setupDownloaderWorker() {
-    // 初始化worker
-    const downloaderWorkerPath = getGlobalContext().workersPath.downloader;
-    if (downloaderWorkerPath) {
-        const worker = new Worker(downloaderWorkerPath);
-        downloaderWorker = Comlink.wrap(worker);
-    }
     setDownloadingConcurrency(AppConfig.getConfig("download.concurrency"));
 }
 
@@ -81,9 +63,7 @@ function setDownloadingConcurrency(concurrency: number) {
 async function startDownload(
     musicItems: IMusic.IMusicItem | IMusic.IMusicItem[],
 ) {
-    if (!downloaderWorker) {
-        setupDownloaderWorker();
-    }
+    setupDownloaderWorker();
 
     const _musicItems = Array.isArray(musicItems) ? musicItems : [musicItems];
     // 过滤掉已下载的、本地音乐、任务中的音乐
@@ -165,11 +145,38 @@ async function downloadMusicImpl(
                 downloadBasePath,
                 `./${fileName}.${ext}`,
             );
-            downloaderWorker.downloadFile(
-                mediaSource,
-                downloadPath,
-                Comlink.proxy((dataState) => {
-                    onStateChange(dataState);
+            // Tauri 迁移（阶段4）：Rust download_file command + 进度事件（并发由本模块 PQueue 控制）
+            await new Promise<void>((resolve) => {
+                let unListen: (() => void) | null = null;
+                let settled = false;
+                const finish = () => {
+                    if (settled) {
+                        return;
+                    }
+                    settled = true;
+                    unListen?.();
+                    resolve();
+                };
+                listen<{
+                    filePath: string;
+                    state: "downloading" | "done" | "error";
+                    currentSize?: number;
+                    totalSize?: number;
+                    msg?: string;
+                }>("download-progress", (evt) => {
+                    if (evt.payload?.filePath !== downloadPath) {
+                        return;
+                    }
+                    const dataState = evt.payload.state === "done"
+                        ? { state: DownloadState.DONE }
+                        : evt.payload.state === "error"
+                            ? { state: DownloadState.ERROR, msg: evt.payload.msg }
+                            : {
+                                state: DownloadState.DOWNLOADING,
+                                downloaded: evt.payload.currentSize,
+                                total: evt.payload.totalSize,
+                            };
+                    onStateChange(dataState as any);
                     if (dataState.state === DownloadState.DONE) {
                         addDownloadedMusicToList(
                             setInternalData<IMusic.IMusicItemInternalData>(
@@ -182,9 +189,23 @@ async function downloadMusicImpl(
                                 true,
                             ) as IMusic.IMusicItem,
                         );
+                        finish();
+                    } else if (dataState.state === DownloadState.ERROR) {
+                        finish();
                     }
-                }),
-            );
+                }).then((un) => {
+                    if (settled) {
+                        un();
+                    } else {
+                        unListen = un;
+                    }
+                });
+                invoke("download_file", { source: mediaSource, filePath: downloadPath }).catch(() => {
+                    // Rust 侧失败也会通过事件回报错误；此处兜底解除挂起
+                    onStateChange({ state: DownloadState.ERROR, msg: "download invoke failed" });
+                    finish();
+                });
+            });
         } else {
             throw new Error("Invalid Source");
         }

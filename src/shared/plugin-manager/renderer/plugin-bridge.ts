@@ -386,7 +386,7 @@ export async function updateAllPlugins(): Promise<void> {
 
 function findPluginMeta(delegate: { hash?: string; platform?: string }): ILoadedPluginMeta | null {
     if (delegate.hash === localPluginHash || delegate.platform === localPluginName) {
-        return null; // 本地音源：阶段4 Rust 化（lofty 元数据）
+        return null; // 本地音源：Rust lofty 实现（localPluginCall）
     }
     if (delegate.hash) {
         return pluginMetas.find((m) => m.hash === delegate.hash) ?? null;
@@ -401,11 +401,62 @@ async function rawCall(meta: ILoadedPluginMeta, method: string, args: any[]): Pr
     return await callRuntime("call-method", { hash: meta.hash, method, args });
 }
 
+/**************************** 本地音源（lofty 元数据，Rust 实现） ****************************/
+
+async function localPluginCall(method: string, args: any[]): Promise<any> {
+    switch (method) {
+        case "getMediaSource": {
+            const musicItem = args[0] as IMusic.IMusicItem;
+            const localPath = (musicItem as any).$$localPath || musicItem.localPath;
+            if (!localPath) {
+                return { url: musicItem.url };
+            }
+            // 本地文件统一走 mediahub（阶段2：Range/协议）
+            const { toMediahubUrl } = await import("@/common/mediahub");
+            return { url: toMediahubUrl(localPath) };
+        }
+        case "getLyric": {
+            const musicItem = args[0] as IMusic.IMusicItem;
+            if (musicItem.rawLrc) {
+                return { rawLrc: musicItem.rawLrc };
+            }
+            const localPath = (musicItem as any).$$localPath || musicItem.localPath;
+            if (!localPath) {
+                return null;
+            }
+            const result = await invoke<any>("read_companion_lrc", { mediaPath: localPath });
+            if (result?.rawLrc) {
+                return { rawLrc: result.rawLrc, translation: result.translation };
+            }
+            return null;
+        }
+        case "importMusicItem": {
+            const filePath = args[0] as string;
+            return await invoke<any>("parse_local_music_item", { path: filePath });
+        }
+        case "importMusicSheet": {
+            const folderPath = args[0] as string;
+            return (await invoke<any[]>("parse_local_music_item_folder", { folder: folderPath })) ?? [];
+        }
+        default:
+            return null;
+    }
+}
+
 export async function callPluginMethod(
     pluginDelegate: { hash?: string; platform?: string },
     method: string,
     ...args: any[]
 ): Promise<any> {
+    // 本地音源分支
+    if (pluginDelegate.hash === localPluginHash || pluginDelegate.platform === localPluginName) {
+        try {
+            return await localPluginCall(method, args);
+        } catch (e: any) {
+            logger.logError(`本地音源方法调用失败 ${method}`, e);
+            return null;
+        }
+    }
     const meta = findPluginMeta(pluginDelegate);
     if (!meta) {
         return null;
