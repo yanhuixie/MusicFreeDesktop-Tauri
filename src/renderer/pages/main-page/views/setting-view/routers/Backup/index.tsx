@@ -8,6 +8,7 @@ import BackupResume from "@/renderer/core/backup-resume";
 import { useTranslation } from "react-i18next";
 import AppConfig from "@shared/app-config/renderer";
 import { dialogUtil, fsUtil } from "@shared/utils/renderer";
+import { withRustFetch } from "@/common/rust-http-adapter";
 
 
 
@@ -38,17 +39,20 @@ export default function Backup() {
                     undefined,
                     0,
                 );
-                if (!(await client.exists("/MusicFree"))) {
-                    await client.createDirectory("/MusicFree");
-                }
-                // 临时文件
-                await client.putFileContents(
-                    "/MusicFree/MusicFreeBackup.json",
-                    backUp,
-                    {
-                        overwrite: true,
-                    },
-                );
+                // Tauri 迁移（阶段3）：webdav 内部 fetch 经 Rust 代理，规避 webview CORS
+                await withRustFetch(async () => {
+                    if (!(await client.exists("/MusicFree"))) {
+                        await client.createDirectory("/MusicFree");
+                    }
+                    // 临时文件
+                    await client.putFileContents(
+                        "/MusicFree/MusicFreeBackup.json",
+                        backUp,
+                        {
+                            overwrite: true,
+                        },
+                    );
+                });
                 toast.success(t("settings.backup.backup_success"));
             } else {
                 toast.error(t("settings.backup.webdav_data_not_complete"));
@@ -78,17 +82,20 @@ export default function Backup() {
                     password: password,
                 });
 
-                if (!(await client.exists("/MusicFree/MusicFreeBackup.json"))) {
-                    throw new Error(
-                        t("settings.backup.webdav_backup_file_not_exist"),
-                    );
-                }
-                const resumeData = await client.getFileContents(
-                    "/MusicFree/MusicFreeBackup.json",
-                    {
-                        format: "text",
-                    },
-                );
+                // Tauri 迁移（阶段3）：webdav 内部 fetch 经 Rust 代理，规避 webview CORS
+                const resumeData = await withRustFetch(async () => {
+                    if (!(await client.exists("/MusicFree/MusicFreeBackup.json"))) {
+                        throw new Error(
+                            t("settings.backup.webdav_backup_file_not_exist"),
+                        );
+                    }
+                    return (await client.getFileContents(
+                        "/MusicFree/MusicFreeBackup.json",
+                        {
+                            format: "text",
+                        },
+                    )) as string;
+                });
                 await BackupResume.resume(
                     resumeData,
                     AppConfig.getConfig("backup.resumeBehavior") === "overwrite",

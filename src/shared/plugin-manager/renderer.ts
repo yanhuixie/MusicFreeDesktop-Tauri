@@ -2,36 +2,18 @@ import Store from "@/common/store";
 import AppConfig from "@shared/app-config/renderer";
 import useAppConfig from "@/hooks/useAppConfig";
 import { useMemo } from "react";
+import * as pluginBridge from "./renderer/plugin-bridge";
 
-interface IPluginDelegateLike {
-    platform?: string;
-    hash?: string;
-}
-
-interface IMod {
-    onPluginUpdated: (callback: (plugins: IPlugin.IPluginDelegate[]) => void) => void,
-
-    callPluginMethod<
-        T extends keyof IPlugin.IPluginInstanceMethods,
-    >(
-        pluginDelegate: IPluginDelegateLike,
-        method: T,
-        ...args: Parameters<IPlugin.IPluginInstanceMethods[T]>
-    ): ReturnType<IPlugin.IPluginInstanceMethods[T]>,
-
-    reloadPlugins: () => Promise<void>;
-    uninstallPlugin: (hash: string) => Promise<void>;
-    updateAllPlugins: () => Promise<void>;
-    installPluginFromRemote: (url: string) => Promise<void>,
-    installPluginFromLocal: (rawCode: string) => Promise<void>,
-}
-
-const mod = window["@shared/plugin-manager" as any] as unknown as IMod;
-
+/**
+ * Tauri 版 plugin-manager renderer（阶段3）
+ * 原实现经 window["@shared/plugin-manager"]（主进程 IPC）；
+ * 现接 plugin-bridge（iframe 运行时 + plugin-fs 文件管理 + Rust http 代理），
+ * 导出签名与查询工具函数保持不变。
+ */
 
 const delegatePluginsStore = new Store<IPlugin.IPluginDelegate[]>([]);
 
-mod.onPluginUpdated((plugins) => {
+pluginBridge.onPluginUpdated((plugins) => {
     delegatePluginsStore.setValue(plugins);
 });
 
@@ -52,8 +34,8 @@ function getSortedSupportedPlugin(
         .filter((_) => _.supportedMethod.includes(featureMethod))
         .sort((a, b) => {
             return (meta[a.platform]?.order ?? Infinity) -
-            (meta[b?.platform]?.order ?? Infinity) <
-            0
+                (meta[b?.platform]?.order ?? Infinity) <
+                0
                 ? -1
                 : 1;
         });
@@ -96,7 +78,7 @@ function isSupportFeatureMethod(platform: string, featureMethod: keyof IPlugin.I
 }
 
 
-function getPluginPrimaryKey(pluginItem: IPluginDelegateLike) {
+function getPluginPrimaryKey(pluginItem: { platform?: string }) {
     return (
         delegatePluginsStore
             .getValue()
@@ -106,7 +88,7 @@ function getPluginPrimaryKey(pluginItem: IPluginDelegateLike) {
 
 
 async function setup() {
-    await mod.reloadPlugins();
+    await pluginBridge.loadAllPlugins();
 }
 
 const PluginManager = {
@@ -119,11 +101,17 @@ const PluginManager = {
     getPluginByPlatform,
     isSupportFeatureMethod,
     getPluginPrimaryKey,
-    callPluginDelegateMethod: mod.callPluginMethod,
-    updateAllPlugins: mod.updateAllPlugins,
-    uninstallPlugin: mod.uninstallPlugin,
-    installPluginFromRemote: mod.installPluginFromRemote,
-    installPluginFromLocal: mod.installPluginFromLocal,
+    callPluginDelegateMethod<T extends keyof IPlugin.IPluginInstanceMethods>(
+        pluginDelegate: { hash?: string; platform?: string },
+        method: T,
+        ...args: Parameters<IPlugin.IPluginInstanceMethods[T]>
+    ): ReturnType<IPlugin.IPluginInstanceMethods[T]> {
+        return pluginBridge.callPluginMethod(pluginDelegate, method as string, ...(args as any[])) as any;
+    },
+    updateAllPlugins: pluginBridge.updateAllPlugins,
+    uninstallPlugin: pluginBridge.uninstallPlugin,
+    installPluginFromRemote: pluginBridge.installPluginFromRemote,
+    installPluginFromLocal: pluginBridge.installPluginFromLocal,
 };
 
 export default PluginManager;
@@ -145,8 +133,8 @@ export function useSortedSupportedPlugin(
         .filter((_) => _.supportedMethod.includes(featureMethod))
         .sort((a, b) => {
             return (meta[a.platform]?.order ?? Infinity) -
-            (meta[b?.platform]?.order ?? Infinity) <
-            0
+                (meta[b?.platform]?.order ?? Infinity) <
+                0
                 ? -1
                 : 1;
         });
@@ -159,8 +147,8 @@ export function useSortedPlugins() {
     return useMemo(() => {
         return [...plugins].sort((a, b) => {
             return (meta[a.platform]?.order ?? Infinity) -
-            (meta[b?.platform]?.order ?? Infinity) <
-            0
+                (meta[b?.platform]?.order ?? Infinity) <
+                0
                 ? -1
                 : 1;
         });

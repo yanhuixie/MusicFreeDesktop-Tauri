@@ -11,6 +11,7 @@
 mod app_config;
 mod mediahub;
 mod message_bus;
+mod plugin_http;
 mod smtc;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -311,6 +312,9 @@ pub fn run() {
             app_config::reset_app_config,
             message_bus::sync_app_state,
             smtc::smtc_update,
+            plugin_http::plugin_http_request,
+            plugin_http::plugin_cookie_get,
+            plugin_http::plugin_cookie_set,
         ])
         .setup(|app| {
             app_config::setup(&app.handle())?;

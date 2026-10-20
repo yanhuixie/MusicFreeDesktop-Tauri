@@ -8,7 +8,6 @@
  * - path polyfill（node path 的 web 等价物，local-music/downloader 等使用）
  * - @shared/themepack（阶段4 Rust zip 化）
  * - @shared/service-manager（阶段3）
- * - @shared/plugin-manager（阶段3 iframe 运行时）
  * - @shared/short-cut（阶段5 tauri-plugin-global-shortcut）
  */
 
@@ -85,39 +84,6 @@ win["@shared/service-manager"] = {
     },
     getServiceHost(_serviceName: string): any {
         return undefined;
-    },
-};
-
-/**************************** @shared/plugin-manager ****************************/
-let pluginUpdatedCallback: ((plugins: any[]) => void) | null = null;
-win["@shared/plugin-manager"] = {
-    onPluginUpdated(callback: (plugins: any[]) => void) {
-        pluginUpdatedCallback = callback;
-    },
-    async callPluginMethod(
-        _pluginDelegate: any,
-        _method: string,
-        ..._args: any[]
-    ): Promise<any> {
-        // 阶段3：iframe 运行时桥接
-        return null;
-    },
-    async reloadPlugins(): Promise<any[]> {
-        const result: any[] = [];
-        pluginUpdatedCallback?.(result);
-        return result;
-    },
-    async uninstallPlugin(_hash: string) {
-        /* 阶段3 */
-    },
-    updateAllPlugins() {
-        /* 阶段3 */
-    },
-    async installPluginFromLocal(_url: string): Promise<any | null> {
-        return null;
-    },
-    async installPluginFromRemote(_url: string): Promise<any | null> {
-        return null;
     },
 };
 
