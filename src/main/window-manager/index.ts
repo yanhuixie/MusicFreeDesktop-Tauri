@@ -104,7 +104,6 @@ class WindowManager implements IWindowManager {
                 nodeIntegrationInWorker: true,
                 webSecurity: false,
                 sandbox: false,
-                webviewTag: true,
             },
             frame: false,
             icon: nativeImage.createFromPath(getResourcePath(ResourceName.LOGO_IMAGE)),

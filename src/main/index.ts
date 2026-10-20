@@ -126,10 +126,7 @@ app.whenReady().then(async () => {
             const mainWindow = windowManager.mainWindow;
 
             if (mainWindow) {
-                const thumbStyle = AppConfig.getConfig("normal.taskbarThumb");
-                if (process.platform === "win32" && thumbStyle === "artwork") {
-                    ThumbBarUtil.setThumbImage(mainWindow, musicItem?.artwork);
-                }
+                // Tauri 移植（计划 §0）：任务栏封面缩略图已放弃，artwork 样式不再生效
                 if (musicItem) {
                     mainWindow.setTitle(
                         musicItem.title + (musicItem.artist ? ` - ${musicItem.artist}` : ""),

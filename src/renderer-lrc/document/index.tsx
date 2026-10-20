@@ -1,3 +1,5 @@
+// Tauri 迁移：必须最先执行，注入 Electron preload 等价的 window["@shared/*"] 桩
+import "@shared/tauri/stub";
 import ReactDOM from "react-dom/client";
 import bootstrap from "./bootstrap";
 import LyricWindowPage from "../pages";

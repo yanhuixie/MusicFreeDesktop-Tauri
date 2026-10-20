@@ -100,3 +100,4 @@ plugins
 .idea/
 
 undefinedelectron-log-preload.js
+.codegraph/

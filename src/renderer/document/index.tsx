@@ -1,5 +1,13 @@
+// Tauri 迁移：必须最先执行，注入 Electron preload 等价的 window["@shared/*"] 桩
+import "@shared/tauri/stub";
 import ReactDOM from "react-dom/client";
 import App from "../app";
+import { localPluginName, toastDuration } from "@/common/constant";
+
+// Tauri 迁移：Electron 版由 window-manager 设置初始 hash（收藏歌单页），此处对齐
+if (!location.hash) {
+    location.hash = `#/main/musicsheet/${localPluginName}/favorite`;
+}
 import "animate.css";
 import ModalComponent from "../components/Modal";
 import bootstrap from "./bootstrap";
@@ -11,7 +19,6 @@ import { ToastContainer } from "react-toastify";
 import "rc-slider/assets/index.css";
 import "react-toastify/dist/ReactToastify.css";
 import "./styles/index.scss"; // 全局样式
-import { toastDuration } from "@/common/constant";
 import useBootstrap from "./useBootstrap";
 import logger from "@shared/logger/renderer";
 import { ErrorBoundary } from "react-error-boundary";

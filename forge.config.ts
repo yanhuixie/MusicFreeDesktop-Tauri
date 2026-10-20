@@ -86,22 +86,10 @@ const config: ForgeConfig = {
             js: "./src/webworkers/local-file-watcher.ts",
             name: "local_file_watcher",
             nodeIntegration: true,
-          },
-          {
-            js: "./src/webworkers/db-worker.ts",
-            name: "db",
-            nodeIntegration: true,
           }
         ],
       },
     }),
-    {
-      name: "@timfish/forge-externals-plugin",
-      config: {
-        externals: ["sharp"],
-        includeDeps: true,
-      },
-    },
   ],
 };
 

@@ -6,8 +6,10 @@ import { useTranslation } from "react-i18next";
 
 export default function HeaderNavigator() {
     const navigate = useNavigate();
-    const canBack = history.state.idx > 0;
-    const canGo = history.state.idx < history.length - 1;
+    // 首次渲染时 history.state 可能为 null（Vite/Tauri 直加载场景）
+    const historyState = history.state ?? { idx: 0 };
+    const canBack = historyState.idx > 0;
+    const canGo = historyState.idx < history.length - 1;
 
     const { t } = useTranslation();
 
