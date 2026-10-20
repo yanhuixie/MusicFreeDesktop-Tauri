@@ -1,19 +1,17 @@
 /**
  * 播放音乐
  */
-import { encodeUrlHeaders } from "@/common/normalize-util";
 import albumImg from "@/assets/imgs/album-cover.jpg";
 import getUrlExt from "@/renderer/utils/get-url-ext";
 import Hls, { Events as HlsEvents, HlsConfig } from "hls.js";
 import { isSameMedia } from "@/common/media-util";
+import { toMediahubUrl, isLocalFileUrl } from "@/common/mediahub";
 import { PlayerState } from "@/common/constant";
-import ServiceManager from "@shared/service-manager/renderer";
+import { invoke } from "@tauri-apps/api/core";
 import ControllerBase from "@renderer/core/track-player/controller/controller-base";
 import { ErrorReason } from "@renderer/core/track-player/enum";
-import Dexie from "dexie";
 import voidCallback from "@/common/void-callback";
 import { IAudioController } from "@/types/audio-controller";
-import Promise = Dexie.Promise;
 
 
 class AudioController extends ControllerBase implements IAudioController {
@@ -27,6 +25,12 @@ class AudioController extends ControllerBase implements IAudioController {
     set playerState(value: PlayerState) {
         if (this._playerState !== value) {
             this.onPlayerStateChanged?.(value);
+            // SMTC 上报（阶段2：系统媒体控制由 Rust souvlaki 实现）
+            if (value === PlayerState.Playing || value === PlayerState.Paused) {
+                invoke("smtc_update", {
+                    update: { playing: value === PlayerState.Playing },
+                }).catch(voidCallback);
+            }
         }
         this._playerState = value;
 
@@ -66,6 +70,21 @@ class AudioController extends ControllerBase implements IAudioController {
                 currentTime: this.audio.currentTime,
                 duration: this.audio.duration, // 缓冲中是Infinity
             });
+            this.reportSmtcPosition();
+        };
+
+        this.audio.onloadedmetadata = () => {
+            // 时长确定后补充 SMTC 元数据
+            if (isFinite(this.audio.duration)) {
+                invoke("smtc_update", {
+                    update: {
+                        title: this.musicItem?.title,
+                        artist: this.musicItem?.artist,
+                        album: this.musicItem?.album,
+                        duration: this.audio.duration,
+                    },
+                }).catch(voidCallback);
+            }
         };
 
         // this.audio.onseeking = () => {
@@ -111,6 +130,19 @@ class AudioController extends ControllerBase implements IAudioController {
             this.hls.destroy();
             this.hls = null;
         }
+    }
+
+    /** SMTC 进度上报（节流 1s） */
+    private lastSmtcPositionReport = 0;
+    private reportSmtcPosition() {
+        const now = Date.now();
+        if (now - this.lastSmtcPositionReport < 1000) {
+            return;
+        }
+        this.lastSmtcPositionReport = now;
+        invoke("smtc_update", {
+            update: { position: this.audio.currentTime },
+        }).catch(voidCallback);
     }
 
     destroy(): void {
@@ -175,6 +207,13 @@ class AudioController extends ControllerBase implements IAudioController {
                 },
             ],
         });
+        invoke("smtc_update", {
+            update: {
+                title: musicItem.title,
+                artist: musicItem.artist,
+                album: musicItem.album,
+            },
+        }).catch(voidCallback);
 
         // 2. reset track
         this.playerState = PlayerState.None;
@@ -199,7 +238,7 @@ class AudioController extends ControllerBase implements IAudioController {
         });
 
 
-        // 2. convert url and headers
+        // 2. convert url and headers → mediahub:// 统一管线（阶段2）
         let url = trackSource.url;
         const urlObj = new URL(trackSource.url);
         let headers: Record<string, any> | null = null;
@@ -228,16 +267,10 @@ class AudioController extends ControllerBase implements IAudioController {
             url = urlObj.toString();
         }
 
-        // 2.3 hack url with headers
-        if (headers) {
-            const forwardedUrl = ServiceManager.RequestForwarderService.forwardRequest(url, "GET", headers);
-            if (forwardedUrl) {
-                url = forwardedUrl;
-                headers = null;
-            } else if (!headers["Authorization"]) {
-                url = encodeUrlHeaders(url, headers);
-                headers = null;
-            }
+        // 2.3 本地文件与带 header 的远程源统一走 mediahub 流式代理
+        //     （对应原 _setHeaders hack + request-forwarder + fetch→blob 三套路径）
+        if (headers || isLocalFileUrl(url)) {
+            url = toMediahubUrl(url, headers ?? undefined);
         }
 
         if (!url) {
@@ -254,19 +287,6 @@ class AudioController extends ControllerBase implements IAudioController {
                 this.onError(ErrorReason.UnsupportedResource);
                 return;
             }
-        } else if (headers) {
-            fetch(url, {
-                method: "GET",
-                headers: {
-                    ...trackSource.headers,
-                },
-            })
-                .then(async (res) => {
-                    const blob = await res.blob();
-                    if (isSameMedia(this.musicItem, musicItem)) {
-                        this.audio.src = URL.createObjectURL(blob);
-                    }
-                });
         } else {
             this.audio.src = url;
         }

@@ -9,7 +9,9 @@
 //! - 日志：tauri-plugin-log
 
 mod app_config;
+mod mediahub;
 mod message_bus;
+mod smtc;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -256,6 +258,17 @@ pub fn run() {
             config_path: std::path::PathBuf::new(),
         }))
         .manage(message_bus::setup())
+        .manage(std::sync::Mutex::new(smtc::SmtcState {
+            controls: None,
+            last_playing: false,
+        }))
+        .register_asynchronous_uri_scheme_protocol("mediahub", move |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let response = mediahub::handle(request, &app).await;
+                responder.respond(response);
+            });
+        })
         .on_window_event(|window, event| {
             // 窗口位置/尺寸记忆（对应 Electron 版 window-manager 的 resize/dragEnd 持久化）
             let app = window.app_handle().clone();
@@ -297,9 +310,12 @@ pub fn run() {
             app_config::set_app_config,
             app_config::reset_app_config,
             message_bus::sync_app_state,
+            smtc::smtc_update,
         ])
         .setup(|app| {
             app_config::setup(&app.handle())?;
+            let smtc_state = smtc::setup(&app.handle());
+            *app.state::<std::sync::Mutex<smtc::SmtcState>>().lock().unwrap() = smtc_state;
             // 主窗口恢复记忆大小
             if let Some(main) = app.get_webview_window("main") {
                 if let Some(size) = app_config::get_config(&app.handle(), "private.mainWindowSize") {
