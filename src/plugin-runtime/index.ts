@@ -60,6 +60,8 @@ window.addEventListener("message", (evt: MessageEvent) => {
         }
     } else if (data.type === "load-plugins") {
         void handleLoadPlugins(data);
+    } else if (data.type === "try-load-plugin") {
+        void handleTryLoadPlugin(data);
     } else if (data.type === "call-method") {
         void handleCallMethod(data);
     }
@@ -348,6 +350,27 @@ async function handleLoadPlugins(data: IpcMessage) {
             loadedPlugins.set(meta.hash, entry);
         }
         results.push(meta);
+    }
+    parent.postMessage({
+        __musicfree_plugin: true,
+        type: "rpc-response",
+        id: data.id,
+        ok: true,
+        result: results,
+    } satisfies IpcMessage, "*");
+}
+
+/** 试加载（安装校验用）：仅解析并返回 meta，不改动 loadedPlugins，
+ *  避免 load-plugins 的 clear 中间态清空已装插件 */
+async function handleTryLoadPlugin(data: IpcMessage) {
+    const { plugins, env } = data.payload || {};
+    if (env) {
+        envSnapshot = env;
+    }
+    const results: any[] = [];
+    for (const { code } of plugins || []) {
+        const entry = loadOnePlugin(code);
+        results.push(instanceMeta(entry, code));
     }
     parent.postMessage({
         __musicfree_plugin: true,

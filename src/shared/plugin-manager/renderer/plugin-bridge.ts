@@ -45,6 +45,9 @@ let runtimeReadyPromise: Promise<void> = new Promise<void>((resolve) => {
 let rpcId = 0;
 const pendingRpc = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void; timer: number }>();
 
+let runtimeEverReady = false;
+let runtimeSelfHealing = false;
+
 window.addEventListener("message", (evt: MessageEvent) => {
     const data = evt.data as IpcMessage;
     if (!data?.__musicfree_plugin) {
@@ -52,6 +55,18 @@ window.addEventListener("message", (evt: MessageEvent) => {
     }
     if (data.type === "runtime-ready") {
         runtimeReadyResolve?.();
+        // WebView2 丢弃/重载隐藏 iframe 后 DOM 元素不变（isConnected 恒真），
+        // 二次 runtime-ready 是唯一重载信号：立即从磁盘全量重载插件自愈，
+        // 否则 iframe 插件表为空而主 frame 缓存仍在，所有方法调用 not found
+        if (runtimeEverReady && pluginMetas.length && !runtimeSelfHealing) {
+            runtimeSelfHealing = true;
+            void loadAllPlugins()
+                .catch(() => {})
+                .finally(() => {
+                    runtimeSelfHealing = false;
+                });
+        }
+        runtimeEverReady = true;
         return;
     }
     if (data.type === "rpc-response") {
@@ -283,7 +298,7 @@ async function installFromRawCode(funcCode: string): Promise<void> {
         appVersion: getGlobalContext().appVersion,
         lang: AppConfig.getConfig("normal.language"),
     };
-    const [meta] = await callRuntime<ILoadedPluginMeta[]>("load-plugins", { plugins: [{ code: funcCode }], env });
+    const [meta] = await callRuntime<ILoadedPluginMeta[]>("try-load-plugin", { plugins: [{ code: funcCode }], env });
     if (!meta?.hash || !meta.platform) {
         throw new Error(`插件无法解析! ${meta?.error || ""}`);
     }
@@ -380,7 +395,12 @@ export async function updateAllPlugins(): Promise<void> {
             }
         }
     }
-    notifyUpdate();
+    // 兜底全量重载：批量更新中途任何失败都不应留下残缺插件表
+    try {
+        await loadAllPlugins();
+    } catch {
+        notifyUpdate();
+    }
 }
 
 /**************************** 方法调用（PluginMethods 逻辑平移） ****************************/
@@ -400,6 +420,31 @@ function findPluginMeta(delegate: { hash?: string; platform?: string }): ILoaded
 
 async function rawCall(meta: ILoadedPluginMeta, method: string, args: any[]): Promise<any> {
     return await callRuntime("call-method", { hash: meta.hash, method, args });
+}
+
+/** 分页/详情类方法的空结果兜底（对齐原主进程 PluginMethods 契约：
+ *  不规范插件返回 null/undefined 或执行失败时返回空分页对象，
+ *  调用方（useRecommendSheets 等）按原版语义不判空直接解引用） */
+function fallbackPluginResult(method: string, args: any[]): any {
+    switch (method) {
+        case "search":
+        case "getRecommendSheetsByTag":
+        case "getArtistWorks":
+        case "getMusicComments":
+            return { isEnd: true, data: [] };
+        case "getRecommendSheetTags":
+            return { data: [] };
+        case "getTopLists":
+            return [];
+        case "getTopListDetail":
+            return { isEnd: true, topListItem: args[0], musicList: [] };
+        case "getAlbumInfo":
+            return { albumItem: args[0], musicList: args[0]?.musicList ?? [], isEnd: true };
+        case "getMusicSheetInfo":
+            return { sheetItem: args[0], musicList: args[0]?.musicList ?? [], isEnd: true };
+        default:
+            return null;
+    }
 }
 
 /**************************** 本地音源（lofty 元数据，Rust 实现） ****************************/
