@@ -505,7 +505,8 @@ export async function callPluginMethod(
     }
     const meta = findPluginMeta(pluginDelegate);
     if (!meta) {
-        return null;
+        // iframe 重载窗口期插件表可能短暂为空，同样按空结果兜底
+        return fallbackPluginResult(method, args);
     }
     try {
         switch (method) {
@@ -614,14 +615,21 @@ export async function callPluginMethod(
             }
             default: {
                 if (!meta.supportedMethod.includes(method)) {
-                    return null;
+                    return fallbackPluginResult(method, args);
                 }
-                return await rawCall(meta, method, args);
+                const result = await rawCall(meta, method, args);
+                if (result == null) {
+                    return fallbackPluginResult(method, args);
+                }
+                if (method === "getRecommendSheetsByTag" && !Array.isArray(result.data)) {
+                    result.data = [];
+                }
+                return result;
             }
         }
     } catch (e: any) {
         logger.logError(`插件方法调用失败 ${meta.platform}.${method}`, e);
-        return null;
+        return fallbackPluginResult(method, args);
     }
 }
 
