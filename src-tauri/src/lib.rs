@@ -20,6 +20,7 @@ mod tray;
 #[cfg(target_os = "windows")]
 mod thumbbar;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// 歌词窗尺寸约束（对齐 Electron 版 window-manager）
@@ -29,6 +30,80 @@ const LRC_MAX_HEIGHT: f64 = 240.0;
 /// 迷你模式窗尺寸
 const MINIMODE_WIDTH: f64 = 340.0;
 const MINIMODE_HEIGHT: f64 = 72.0;
+/// 主窗口尺寸记忆的下限：低于此值的记录视为脏数据（最小化事件会带 ~143x17 的胶囊尺寸）
+const MAIN_MIN_SAVED_WIDTH: f64 = 600.0;
+const MAIN_MIN_SAVED_HEIGHT: f64 = 400.0;
+
+/// 主窗口尺寸记忆的尾随防抖状态（Resized 高频触发，不能逐次整份写盘）
+struct MainSizePersist {
+    pending: std::sync::Mutex<Option<(f64, f64)>>,
+    scheduled: AtomicBool,
+}
+
+impl MainSizePersist {
+    fn new() -> Self {
+        Self { pending: std::sync::Mutex::new(None), scheduled: AtomicBool::new(false) }
+    }
+}
+
+/// 记录待持久化的主窗口尺寸，若尚无等待线程则启动一个（停止变化 300ms 后写盘）
+fn schedule_main_size_persist(app: &AppHandle, width: f64, height: f64) {
+    let state = app.state::<MainSizePersist>();
+    *state.pending.lock().unwrap() = Some((width, height));
+    if state.scheduled.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let state = app.state::<MainSizePersist>();
+        let pending = state.pending.lock().unwrap().take();
+        if let Some((width, height)) = pending {
+            app_config::set_config(
+                &app,
+                serde_json::json!({"private.mainWindowSize": {"width": width, "height": height}}),
+            );
+            continue;
+        }
+        state.scheduled.store(false, Ordering::SeqCst);
+        // 清标志与事件入队之间的竞态兜底：期间有新尺寸则继续这一轮
+        if state.pending.lock().unwrap().is_none() || state.scheduled.swap(true, Ordering::SeqCst) {
+            break;
+        }
+    });
+}
+
+/// 启动时恢复主窗口尺寸：校验下限 + 限制在当前显示器工作区内
+fn restore_main_window_size(app: &AppHandle) {
+    let Some(main) = app.get_webview_window("main") else { return };
+    let Some(size) = app_config::get_config(app, "private.mainWindowSize") else { return };
+    if size.is_null() {
+        return;
+    }
+    let (mut width, mut height) = match (
+        size.get("width").and_then(|v| v.as_f64()),
+        size.get("height").and_then(|v| v.as_f64()),
+    ) {
+        (Some(w), Some(h))
+            if w.is_finite() && h.is_finite() && w >= MAIN_MIN_SAVED_WIDTH && h >= MAIN_MIN_SAVED_HEIGHT =>
+        {
+            (w, h)
+        }
+        _ => {
+            // 历史脏数据（如最小化时写入的胶囊尺寸）直接作废，回到 tauri.conf 默认尺寸
+            log::warn!("主窗口尺寸记忆无效（{size}），已重置");
+            app_config::set_config(app, serde_json::json!({"private.mainWindowSize": null}));
+            return;
+        }
+    };
+    if let Ok(Some(monitor)) = main.current_monitor() {
+        let scale = monitor.scale_factor();
+        let area = monitor.work_area();
+        width = width.min(area.size.width as f64 / scale);
+        height = height.min(area.size.height as f64 / scale);
+    }
+    let _ = main.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, height)));
+}
 
 fn create_lyric_window(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window("lrc").is_some() {
@@ -254,7 +329,7 @@ fn get_global_context(app: AppHandle, window: tauri::WebviewWindow) -> serde_jso
         .download_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
-    let res_dir = data_dir.clone();
+    let res_dir = paths::res_dir(app_handle).to_string_lossy().to_string();
     let platform = if cfg!(target_os = "windows") {
         "win32"
     } else if cfg!(target_os = "macos") {
@@ -481,6 +556,7 @@ pub fn run() {
             config_path: std::path::PathBuf::new(),
         }))
         .manage(message_bus::setup())
+        .manage(MainSizePersist::new())
         .manage(local_media::setup_watcher_state())
         .manage(std::sync::Mutex::new(smtc::SmtcState {
             controls: None,
@@ -500,12 +576,18 @@ pub fn run() {
             let app = window.app_handle().clone();
             let label = window.label().to_string();
             if let tauri::WindowEvent::Resized(size) = event {
-                if label == "main" {
+                // 最小化/最大化时也会收到 Resized（最小化会带 143x17 这类图标尺寸），
+                // 不能写入记忆：启动时 set_size 走 SetWindowPos，会绕过 minWidth/minHeight
+                if label == "main"
+                    && !window.is_minimized().unwrap_or(false)
+                    && !window.is_maximized().unwrap_or(false)
+                {
                     let logical = size.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
-                    app_config::set_config(
-                        &app,
-                        serde_json::json!({"private.mainWindowSize": {"width": logical.width, "height": logical.height}}),
-                    );
+                    if logical.width >= MAIN_MIN_SAVED_WIDTH
+                        && logical.height >= MAIN_MIN_SAVED_HEIGHT
+                    {
+                        schedule_main_size_persist(&app, logical.width, logical.height);
+                    }
                 }
             } else if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // 关闭行为（阶段5）：normal.closeBehavior=minimize → 隐藏到托盘
@@ -591,16 +673,8 @@ pub fn run() {
             setup_deep_link(app.handle().clone())?;
             // 启动时按配置注册全局快捷键（对应原版 shortCut.setup）
             setup_global_shortcuts(app.handle().clone())?;
-            // 主窗口恢复记忆大小
-            if let Some(main) = app.get_webview_window("main") {
-                if let Some(size) = app_config::get_config(&app.handle(), "private.mainWindowSize") {
-                    let w = size.get("width").and_then(|v| v.as_f64());
-                    let h = size.get("height").and_then(|v| v.as_f64());
-                    if let (Some(w), Some(h)) = (w, h) {
-                        let _ = main.set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)));
-                    }
-                }
-            }
+            // 主窗口恢复记忆大小（含脏数据自愈与多显示器边界限制）
+            restore_main_window_size(&app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())

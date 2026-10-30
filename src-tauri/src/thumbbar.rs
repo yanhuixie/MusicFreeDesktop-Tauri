@@ -20,17 +20,24 @@ use windows::Win32::UI::WindowsAndMessaging::{CreateIcon, DestroyIcon, HICON};
 pub struct ThumbbarState {
     pub added: bool,
     pub playing: bool,
+    /// 已提交给任务栏的图标句柄：任务栏会自行拷贝，更新后即可销毁上一批
+    icons: Vec<usize>,
 }
 
 pub fn setup_state() -> Mutex<ThumbbarState> {
-    Mutex::new(ThumbbarState { added: false, playing: false })
+    Mutex::new(ThumbbarState { added: false, playing: false, icons: Vec::new() })
 }
 
 const SUBCLASS_ID: usize = 0x4D46; // "MF"
 
-unsafe fn png_to_hicon(png_path: &std::path::Path) -> Option<HICON> {
-    let bytes = std::fs::read(png_path).ok()?;
-    let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+// 图标随二进制内嵌：便携版（单文件拷贝）与安装版都不再依赖运行时 res/ 目录
+const SKIP_LEFT_PNG: &[u8] = include_bytes!("../../res/skip-left.png");
+const PLAY_PNG: &[u8] = include_bytes!("../../res/play.png");
+const PAUSE_PNG: &[u8] = include_bytes!("../../res/pause.png");
+const SKIP_RIGHT_PNG: &[u8] = include_bytes!("../../res/skip-right.png");
+
+unsafe fn png_to_hicon(bytes: &[u8]) -> Option<HICON> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     // BGRA、行序自下而上（CreateIcon 期望 DDB 行序）
     let mut color_bits = vec![0u8; (w as usize * 4) * h as usize];
@@ -67,11 +74,10 @@ fn apply_buttons(app: &AppHandle, playing: bool) {
     };
     let hwnd = HWND(hwnd_raw.0 as *mut core::ffi::c_void);
 
-    let res = crate::paths::res_dir(app);
-    let icon_paths = [
-        res.join("skip-left.png"),
-        if playing { res.join("pause.png") } else { res.join("play.png") },
-        res.join("skip-right.png"),
+    let icon_pngs: [&[u8]; 3] = [
+        SKIP_LEFT_PNG,
+        if playing { PAUSE_PNG } else { PLAY_PNG },
+        SKIP_RIGHT_PNG,
     ];
     let tips = [
         crate::tray::tray_text(app, "main.previous_music"),
@@ -92,15 +98,18 @@ fn apply_buttons(app: &AppHandle, playing: bool) {
             return;
         };
 
-        let mut icon_handles: Vec<HICON> = Vec::new();
+        let mut handles: Vec<usize> = Vec::with_capacity(3);
         let mut buttons: [THUMBBUTTON; 3] = std::array::from_fn(|i| {
             let mut btn = THUMBBUTTON::default();
             btn.iId = (40001 + i) as u32;
             btn.dwFlags = THBF_ENABLED;
             btn.dwMask = THB_ICON | THB_TOOLTIP;
-            if let Some(hicon) = png_to_hicon(&icon_paths[i]) {
-                btn.hIcon = hicon;
-                icon_handles.push(hicon);
+            match png_to_hicon(icon_pngs[i]) {
+                Some(hicon) => {
+                    btn.hIcon = hicon;
+                    handles.push(hicon.0 as usize);
+                }
+                None => log::warn!("thumbar 图标解码失败：第 {i} 个按钮（iId={}）", 40001 + i),
             }
             let tip: Vec<u16> = tips[i].encode_utf16().collect();
             let n = tip.len().min(259);
@@ -109,7 +118,10 @@ fn apply_buttons(app: &AppHandle, playing: bool) {
         });
 
         let state = app.state::<Mutex<ThumbbarState>>();
-        let Ok(mut guard) = state.lock() else { return };
+        let Ok(mut guard) = state.lock() else {
+            destroy_icons(&handles);
+            return;
+        };
         let result = if guard.added {
             taskbar.ThumbBarUpdateButtons(hwnd, &mut buttons)
         } else {
@@ -121,8 +133,19 @@ fn apply_buttons(app: &AppHandle, playing: bool) {
         };
         if result.is_err() {
             guard.added = false;
+            destroy_icons(&handles);
+        } else {
+            // 任务栏已持有自己的拷贝，上一批句柄可释放
+            destroy_icons(&guard.icons);
+            guard.icons = handles;
         }
         guard.playing = playing;
+    }
+}
+
+unsafe fn destroy_icons(handles: &[usize]) {
+    for &handle in handles {
+        let _ = DestroyIcon(HICON(handle as *mut core::ffi::c_void));
     }
 }
 
