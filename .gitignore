@@ -94,3 +94,5 @@ plugins
 .idea/
 
 .codegraph/
+
+dist/
