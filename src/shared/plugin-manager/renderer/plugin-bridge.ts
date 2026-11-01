@@ -11,7 +11,6 @@ import { nanoid } from "nanoid";
 import { invoke } from "@tauri-apps/api/core";
 import { compare } from "compare-versions";
 import * as pluginFs from "@tauri-apps/plugin-fs";
-import { appDataDir } from "@tauri-apps/api/path";
 import AppConfig from "@shared/app-config/renderer";
 import { getGlobalContext } from "@shared/global-context/renderer";
 import { getInternalData, resetMediaItem } from "@/common/media-util";
@@ -33,6 +32,25 @@ interface ILoadedPluginMeta {
     error?: string;
     supportedMethod: string[];
     meta: any;
+    fileName?: string;
+}
+
+/** 插件清单缓存条目：size+mtimeMs 未变则启动时跳过读文件/哈希/执行 */
+interface IPluginManifestEntry {
+    fileName: string;
+    size: number;
+    mtimeMs: number;
+    hash: string;
+    platform: string;
+    stateCode?: string;
+    error?: string;
+    supportedMethod: string[];
+    meta: any;
+}
+
+/** 扫描阶段临时携带插件源码（解析后即丢弃，不落清单） */
+interface IPluginScanEntry extends IPluginManifestEntry {
+    code?: string;
 }
 
 /**************************** iframe 管理 ****************************/
@@ -47,6 +65,11 @@ const pendingRpc = new Map<number, { resolve: (v: any) => void; reject: (e: any)
 
 let runtimeEverReady = false;
 let runtimeSelfHealing = false;
+/** iframe 代际：重载后自增，用于丢弃旧 iframe 在飞 RPC 的结果 */
+let iframeGeneration = 0;
+/** 已把代码送入 iframe 的插件 hash（懒加载：清单命中时首次调用才执行插件代码） */
+const runtimeLoadedHashes = new Set<string>();
+const runtimeLoadPending = new Map<string, Promise<void>>();
 
 window.addEventListener("message", (evt: MessageEvent) => {
     const data = evt.data as IpcMessage;
@@ -55,16 +78,26 @@ window.addEventListener("message", (evt: MessageEvent) => {
     }
     if (data.type === "runtime-ready") {
         runtimeReadyResolve?.();
-        // WebView2 丢弃/重载隐藏 iframe 后 DOM 元素不变（isConnected 恒真），
-        // 二次 runtime-ready 是唯一重载信号：立即从磁盘全量重载插件自愈，
-        // 否则 iframe 插件表为空而主 frame 缓存仍在，所有方法调用 not found
-        if (runtimeEverReady && pluginMetas.length && !runtimeSelfHealing) {
-            runtimeSelfHealing = true;
-            void loadAllPlugins()
-                .catch(() => {})
-                .finally(() => {
-                    runtimeSelfHealing = false;
-                });
+        if (runtimeEverReady) {
+            // WebView2 丢弃/重载隐藏 iframe 后 DOM 元素不变（isConnected 恒真），
+            // 二次 runtime-ready 是唯一重载信号：递增代际、清空镜像与在飞懒加载，
+            // 并让在飞 RPC 立即失败（否则会等满 120s 超时）
+            iframeGeneration += 1;
+            runtimeLoadedHashes.clear();
+            runtimeLoadPending.clear();
+            for (const pending of pendingRpc.values()) {
+                clearTimeout(pending.timer);
+                pending.reject(new Error("plugin runtime reloaded"));
+            }
+            pendingRpc.clear();
+            if (pluginMetas.length && !runtimeSelfHealing) {
+                runtimeSelfHealing = true;
+                void loadAllPlugins()
+                    .catch(() => {})
+                    .finally(() => {
+                        runtimeSelfHealing = false;
+                    });
+            }
         }
         runtimeEverReady = true;
         return;
@@ -90,6 +123,7 @@ export function ensurePluginRuntime(): Promise<void> {
     // 重建 iframe（页面 reload / HMR 后旧引用失效），ready promise 随之重置
     pluginIframe?.remove();
     pluginIframe = null;
+    iframeGeneration += 1;
     runtimeReadyPromise = new Promise<void>((resolve) => {
         runtimeReadyResolve = resolve;
     });
@@ -163,13 +197,21 @@ window.addEventListener("message", async (evt: MessageEvent) => {
 
 /**************************** 插件目录与加载 ****************************/
 let pluginDir: string | null = null;
+let dataDir: string | null = null;
+
+async function getDataDir(): Promise<string> {
+    if (!dataDir) {
+        dataDir = (await invoke<string>("get_data_dir")) || "";
+    }
+    return dataDir;
+}
 
 async function getPluginDir(): Promise<string> {
     if (pluginDir) {
         return pluginDir;
     }
     // 便携版支持（阶段5）：exe 旁 portable/ 目录优先
-    const userData = (await invoke<string>("get_data_dir")) || "";
+    const userData = await getDataDir();
     pluginDir = joinPath(userData, "musicfree-plugins");
     try {
         await pluginFs.mkdir(pluginDir, { recursive: true });
@@ -209,6 +251,82 @@ async function getPluginDir(): Promise<string> {
     return pluginDir;
 }
 
+/** 清单缓存：命中时启动不再读取/执行 6.7MB 插件代码，插件实例在首次方法调用时懒加载 */
+const PLUGIN_MANIFEST_VERSION = 1;
+let manifestRaw = "";
+
+async function getManifestPath(): Promise<string | null> {
+    const dir = await getDataDir();
+    // 数据目录异常时禁用清单缓存（避免落到盘根 \plugin-manifest.json）
+    return dir ? joinPath(dir, "plugin-manifest.json") : null;
+}
+
+async function readPluginManifest(): Promise<IPluginManifestEntry[]> {
+    try {
+        const path = await getManifestPath();
+        if (!path) {
+            return [];
+        }
+        const raw = await pluginFs.readTextFile(path);
+        const parsed = JSON.parse(raw);
+        // app 版本变化可能改变插件 meta（如版本兼容判断），缓存整体作废
+        if (
+            parsed?.version === PLUGIN_MANIFEST_VERSION &&
+            parsed?.appVersion === getGlobalContext().appVersion &&
+            Array.isArray(parsed.plugins)
+        ) {
+            manifestRaw = raw;
+            return parsed.plugins.filter(
+                (entry: any) =>
+                    entry &&
+                    typeof entry.fileName === "string" &&
+                    typeof entry.hash === "string" &&
+                    entry.hash.length > 0 &&
+                    Number.isFinite(entry.size) &&
+                    Number.isFinite(entry.mtimeMs) &&
+                    Array.isArray(entry.supportedMethod),
+            );
+        }
+    } catch {
+        /* 无缓存或缓存损坏：走全量扫描 */
+    }
+    manifestRaw = "";
+    return [];
+}
+
+async function writePluginManifest(entries: IPluginManifestEntry[]): Promise<void> {
+    try {
+        const path = await getManifestPath();
+        if (!path) {
+            return;
+        }
+        const raw = JSON.stringify({
+            version: PLUGIN_MANIFEST_VERSION,
+            appVersion: getGlobalContext().appVersion,
+            plugins: entries.map(
+                ({ fileName, size, mtimeMs, hash, platform, stateCode, error, supportedMethod, meta }) => ({
+                    fileName,
+                    size,
+                    mtimeMs,
+                    hash,
+                    platform,
+                    stateCode,
+                    error,
+                    supportedMethod,
+                    meta,
+                }),
+            ),
+        });
+        if (raw === manifestRaw) {
+            return;
+        }
+        await pluginFs.writeTextFile(path, raw);
+        manifestRaw = raw;
+    } catch {
+        /* 缓存写入失败不影响本次加载 */
+    }
+}
+
 async function downloadPluginCode(url: string): Promise<string | null> {
     const result = await invoke<any>("plugin_http_request", {
         config: { url, method: "get", timeoutMs: 30000 },
@@ -235,69 +353,166 @@ function notifyUpdate() {
     pluginUpdateCallback?.(JSON.parse(JSON.stringify(toDelegates())));
 }
 
-export async function loadAllPlugins(): Promise<IPlugin.IPluginDelegate[]> {
-    await ensurePluginRuntime();
-    const dir = await getPluginDir();
-    const entries = await pluginFs.readDir(dir).catch(() => [] as any[]);
-    const codes: Array<{ code: string; fileName: string }> = [];
-    const hashSet = new Set<string>();
-    // 静态导入 crypto-js 计算 hash（避免动态 import 复杂度）
-    const CryptoJs = (await import("crypto-js")).default;
-    for (const entry of entries) {
-        if (!entry.isFile || !entry.name.endsWith(".js")) {
-            continue;
-        }
-        try {
-            const code = await pluginFs.readTextFile(`${dir}\\${entry.name}`);
-            const hash = CryptoJs.SHA256(code).toString();
-            if (hashSet.has(hash)) {
-                continue;
-            }
-            hashSet.add(hash);
-            codes.push({ code, fileName: entry.name });
-        } catch {
-            /* 忽略不可读文件 */
-        }
-    }
-    const env = {
+function pluginEnv() {
+    return {
         pluginMeta: AppConfig.getConfig("private.pluginMeta") ?? {},
         platform: "win32",
         appVersion: getGlobalContext().appVersion,
         lang: AppConfig.getConfig("normal.language"),
     };
-    pluginMetas = await callRuntime<ILoadedPluginMeta[]>("load-plugins", {
-        plugins: codes.map((c) => ({ code: c.code })),
-        env,
+}
+
+let loadPluginsChain: Promise<unknown> = Promise.resolve();
+/** 插件表是否完成过一次成功扫描（安装/卸载入口据此确保去重与版本校验有效） */
+let pluginsInitialized = false;
+
+/** 串行化：启动/安装更新/自愈可能并发调用，避免 iframe 插件表与主 frame 镜像分叉 */
+export function loadAllPlugins(): Promise<IPlugin.IPluginDelegate[]> {
+    const run = loadPluginsChain.then(
+        () => loadAllPluginsImpl(),
+        () => loadAllPluginsImpl(),
+    );
+    loadPluginsChain = run.catch(() => {});
+    return run;
+}
+
+async function loadAllPluginsImpl(): Promise<IPlugin.IPluginDelegate[]> {
+    const startedAt = performance.now();
+    const dir = await getPluginDir();
+    let readDirResult: Awaited<ReturnType<typeof pluginFs.readDir>> | null = null;
+    // 目录可能被外部程序/杀软短暂占用：失败后重试一次
+    for (let attempt = 0; attempt < 2 && !readDirResult; attempt++) {
+        try {
+            readDirResult = await pluginFs.readDir(dir);
+        } catch {
+            readDirResult = null;
+            if (attempt === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+        }
+    }
+    if (!readDirResult) {
+        // 读目录失败时保持现有插件表，不能把空清单落盘
+        logger.logWarn("读取插件目录失败", { dir });
+        return toDelegates();
+    }
+    const entries = readDirResult.filter((entry) => entry.isFile && entry.name.endsWith(".js"));
+    const cachedByName = new Map((await readPluginManifest()).map((entry) => [entry.fileName, entry]));
+
+    // 1) 逐个 stat 比对缓存；未命中的并行读取代码并计算 hash
+    const scanned = await Promise.all(
+        entries.map(async (entry): Promise<IPluginScanEntry | null> => {
+            const filePath = `${dir}\\${entry.name}`;
+            try {
+                const info = await pluginFs.stat(filePath);
+                const size = info.size ?? 0;
+                const mtime = info.mtime ? new Date(info.mtime).getTime() : 0;
+                const mtimeMs = Number.isFinite(mtime) ? mtime : 0;
+                const cached = cachedByName.get(entry.name);
+                if (
+                    cached &&
+                    mtimeMs > 0 &&
+                    cached.size === size &&
+                    cached.mtimeMs === mtimeMs &&
+                    cached.platform
+                ) {
+                    return cached;
+                }
+                // 仅缓存未命中时加载 crypto-js
+                const CryptoJs = (await import("crypto-js")).default;
+                const code = await pluginFs.readTextFile(filePath);
+                return {
+                    fileName: entry.name,
+                    size,
+                    mtimeMs,
+                    hash: CryptoJs.SHA256(code).toString(),
+                    platform: "",
+                    supportedMethod: [],
+                    meta: {},
+                    code,
+                };
+            } catch {
+                return null;
+            }
+        }),
+    );
+
+    const valid = scanned.filter((entry): entry is IPluginScanEntry => !!entry);
+    const changed = valid.filter((entry) => !entry.platform && entry.code != null);
+    // 2) 只在文件新增/变更时解析元数据；load-plugins 合并进 iframe 插件表（不清空）
+    if (changed.length) {
+        await ensurePluginRuntime();
+        const generation = iframeGeneration;
+        try {
+            const parsed = await callRuntime<ILoadedPluginMeta[]>("load-plugins", {
+                plugins: changed.map((entry) => ({ code: entry.code!, hash: entry.hash })),
+                env: pluginEnv(),
+            });
+            changed.forEach((entry, index) => {
+                const meta = parsed?.[index];
+                entry.platform = meta?.platform ?? "";
+                entry.stateCode = meta?.stateCode;
+                entry.error = meta?.error;
+                entry.supportedMethod = meta?.supportedMethod ?? [];
+                entry.meta = meta?.meta ?? {};
+                entry.hash = meta?.hash || entry.hash;
+                // 只登记 iframe 实际注册成功的插件（解析失败时 meta.hash 为空）
+                if (meta?.hash && generation === iframeGeneration) {
+                    runtimeLoadedHashes.add(meta.hash);
+                }
+            });
+        } catch (e: any) {
+            logger.logWarn("插件解析失败，沿用缓存/空结果", { error: e?.message });
+        }
+    }
+    valid.forEach((entry) => {
+        delete entry.code;
     });
-    // 记录文件路径（卸载用）
-    const metaWithFile = pluginMetas.map((m, i) => ({ ...m }));
-    const codeHashes = codes.map((c) => CryptoJs.SHA256(c.code).toString());
-    // @ts-ignore 附加文件名映射
-    pluginMetas.forEach((m, i) => {
-        (m as any).fileName = codes[i]?.fileName;
-        (m as any).fileHash = codeHashes[i];
-    });
-    void metaWithFile;
+
+    // 3) 同内容去重（保留首个文件名），重建委托表
+    const seenHashes = new Set<string>();
+    const unique: IPluginManifestEntry[] = [];
+    for (const entry of valid) {
+        if (!entry.hash || !entry.platform || seenHashes.has(entry.hash)) {
+            continue;
+        }
+        seenHashes.add(entry.hash);
+        unique.push(entry);
+    }
+    pluginMetas = unique.map((entry) => ({
+        hash: entry.hash,
+        platform: entry.platform,
+        stateCode: entry.stateCode,
+        error: entry.error,
+        supportedMethod: entry.supportedMethod,
+        meta: entry.meta,
+        fileName: entry.fileName,
+    }));
+    await writePluginManifest(valid);
+
+    logger.logPerf(
+        `loadAllPlugins ready: ${unique.length} plugins, ${changed.length} parsed, ${Math.round(performance.now() - startedAt)}ms`,
+    );
+    pluginsInitialized = true;
     notifyUpdate();
     return toDelegates();
 }
 
 /**************************** 安装 / 卸载 / 更新 ****************************/
 async function installFromRawCode(funcCode: string): Promise<void> {
+    // 启动期深链/手动安装可能早于插件表扫描：先确保去重与版本校验基于完整插件表
+    if (!pluginsInitialized) {
+        await loadAllPlugins().catch(() => {});
+    }
     const CryptoJs = (await import("crypto-js")).default;
     const sha256 = CryptoJs.SHA256(funcCode).toString();
     // 与现有插件比对
-    const existing = pluginMetas.find((m) => (m as any).fileHash === sha256 || m.hash === sha256);
+    const existing = pluginMetas.find((m) => m.hash === sha256);
     if (existing) {
         return; // 静默忽略重复安装
     }
     // 先在 iframe 中试加载，验证可解析并拿到 platform/version
-    const env = {
-        pluginMeta: AppConfig.getConfig("private.pluginMeta") ?? {},
-        platform: "win32",
-        appVersion: getGlobalContext().appVersion,
-        lang: AppConfig.getConfig("normal.language"),
-    };
+    const env = pluginEnv();
     const [meta] = await callRuntime<ILoadedPluginMeta[]>("try-load-plugin", { plugins: [{ code: funcCode }], env });
     if (!meta?.hash || !meta.platform) {
         throw new Error(`插件无法解析! ${meta?.error || ""}`);
@@ -313,10 +528,12 @@ async function installFromRawCode(funcCode: string): Promise<void> {
     await pluginFs.writeTextFile(`${dir}\\${fileName}`, funcCode);
     if (oldVersionPlugin) {
         try {
-            await pluginFs.remove(`${dir}\\${(oldVersionPlugin as any).fileName}`, { recursive: false });
+            await pluginFs.remove(`${dir}\\${oldVersionPlugin.fileName}`, { recursive: false });
         } catch {
             /* 忽略 */
         }
+        // 旧版本实例已无委托引用，清理 iframe 内引用
+        unloadPluginInstance(oldVersionPlugin.hash);
     }
     await loadAllPlugins();
 }
@@ -373,14 +590,20 @@ export function joinPath(base: string, rel: string): string {
 }
 
 export async function uninstallPlugin(hash: string): Promise<void> {
+    if (!pluginsInitialized) {
+        await loadAllPlugins().catch(() => {});
+    }
     const target = pluginMetas.find((m) => m.hash === hash);
     if (target) {
         try {
             const dir = await getPluginDir();
-            await pluginFs.remove(`${dir}\\${(target as any).fileName}`, { recursive: false });
+            await pluginFs.remove(`${dir}\\${target.fileName}`, { recursive: false });
         } catch {
             /* 忽略 */
         }
+        // 等在飞懒加载结束再卸载，避免其晚到的镜像回写撤销本次清理
+        await runtimeLoadPending.get(hash)?.catch(() => {});
+        unloadPluginInstance(hash);
         await loadAllPlugins();
     }
 }
@@ -419,7 +642,56 @@ function findPluginMeta(delegate: { hash?: string; platform?: string }): ILoaded
 }
 
 async function rawCall(meta: ILoadedPluginMeta, method: string, args: any[]): Promise<any> {
+    await ensurePluginCodeLoaded(meta);
     return await callRuntime("call-method", { hash: meta.hash, method, args });
+}
+
+/** 懒加载：清单命中的插件在首次方法调用时才读取代码并送入 iframe 执行 */
+async function ensurePluginCodeLoaded(meta: ILoadedPluginMeta): Promise<void> {
+    if (runtimeLoadedHashes.has(meta.hash)) {
+        return;
+    }
+    const pending = runtimeLoadPending.get(meta.hash);
+    if (pending) {
+        return pending;
+    }
+    const task = (async () => {
+        if (!meta.fileName) {
+            throw new Error(`插件文件未知: ${meta.platform || meta.hash.slice(0, 8)}`);
+        }
+        const dir = await getPluginDir();
+        const code = await pluginFs.readTextFile(`${dir}\\${meta.fileName}`);
+        await ensurePluginRuntime();
+        const generation = iframeGeneration;
+        const loaded = await callRuntime<boolean>("load-plugin", {
+            hash: meta.hash,
+            code,
+            env: pluginEnv(),
+        });
+        if (!loaded) {
+            throw new Error(`插件加载失败: ${meta.platform || meta.hash.slice(0, 8)}`);
+        }
+        // iframe 在 RPC 期间被重建时结果已失效，不能写入镜像
+        if (generation === iframeGeneration) {
+            runtimeLoadedHashes.add(meta.hash);
+        }
+    })().finally(() => {
+        // 只删自己这一条：重载时 clear 后可能已创建新一代同 hash 的 task
+        if (runtimeLoadPending.get(meta.hash) === task) {
+            runtimeLoadPending.delete(meta.hash);
+        }
+    });
+    runtimeLoadPending.set(meta.hash, task);
+    return task;
+}
+
+/** 清理 iframe 内插件实例引用（无法停止插件模块已创建的定时器，彻底回收需重建 iframe） */
+function unloadPluginInstance(hash: string): void {
+    runtimeLoadedHashes.delete(hash);
+    runtimeLoadPending.delete(hash);
+    if (pluginIframe?.isConnected) {
+        void callRuntime("unload-plugin", { hash }).catch(() => {});
+    }
 }
 
 /** 分页/详情类方法的空结果兜底（对齐原主进程 PluginMethods 契约：

@@ -28,17 +28,26 @@ import AppConfig from "@shared/app-config/renderer";
 import trackPlayer from "../core/track-player";
 
 logger.logPerf("Create Bundle");
+
+function renderApp() {
+    ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary
+        FallbackComponent={Fallback} onReset={() => {
+            // 删除软件配置
+            AppConfig.reset();
+            trackPlayer.reset();
+        }}><Root></Root></ErrorBoundary>);
+}
+
 setupGlobalContext()
     .then(bootstrap)
     .then(() => {
         logger.logPerf("Bundle Bootstrap Ready");
-        ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary
-            FallbackComponent={Fallback} onReset={() => {
-                // 删除软件配置
-                AppConfig.reset();
-                trackPlayer.reset();
-            }}><Root></Root></ErrorBoundary>);
-    });
+    })
+    .catch((e) => {
+        // 启动初始化失败也要渲染（交给 ErrorBoundary / 空状态兜底），不能留白屏
+        logger.logError("启动初始化失败", e);
+    })
+    .finally(renderApp);
 
 function Root() {
     return (

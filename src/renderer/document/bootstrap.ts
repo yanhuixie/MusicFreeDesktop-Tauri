@@ -22,10 +22,7 @@ import shortCut from "@shared/short-cut/renderer";
 setAutoFreeze(false);
 
 export default async function () {
-    await Promise.all([
-        AppConfig.setup(),
-        PluginManager.setup(),
-    ]);
+    await AppConfig.setup();
     await Promise.all([
         MusicSheet.frontend.setupMusicSheets(),
         trackPlayer.setup(),
@@ -43,17 +40,6 @@ export default async function () {
     setupRecentlyPlaylist();
     // 本地服务
     ServiceManager.setup();
-
-    // 自动更新插件
-    if (AppConfig.getConfig("plugin.autoUpdatePlugin")) {
-        const lastUpdated = +(localStorage.getItem("pluginLastupdatedTime") || 0);
-        const now = Date.now();
-        if (Math.abs(now - lastUpdated) > 86400000) {
-            localStorage.setItem("pluginLastupdatedTime", `${now}`);
-            PluginManager.updateAllPlugins();
-        }
-    }
-
 }
 
 function dropHandler() {

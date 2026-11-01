@@ -6,6 +6,27 @@
     <meta name="referrer" content="no-referrer"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style id="themepack-node"></style>
+    <!-- 首屏底色：复用上次主题背景色（无主题则用默认色），避免 WebView/主题加载前白屏闪烁 -->
+    <script>
+      try {
+        var themeBg = localStorage.getItem("themepack-bg");
+        if (themeBg) {
+          var rootStyle = document.documentElement.style;
+          rootStyle.setProperty("--boot-bg", themeBg);
+          // 同时覆盖应用样式表的 --backgroundColor，主题应用后由 JS 移除
+          rootStyle.setProperty("--backgroundColor", themeBg);
+        }
+      } catch (e) {
+        /* localStorage 不可用时用默认底色 */
+      }
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background-color: var(--boot-bg, #fdfdfd);
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

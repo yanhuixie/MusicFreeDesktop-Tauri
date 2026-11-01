@@ -269,7 +269,7 @@ class TrackPlayer {
 
         // 5. fetch music source
         this.fetchMediaSource(currentMusic, defaultQuality).then(({ mediaSource, quality }) => {
-            if (this.isCurrentMusic(currentMusic)) {
+            if (mediaSource?.url && this.isCurrentMusic(currentMusic)) {
                 this.setTrack(mediaSource, currentMusic, {
                     seekTo: currentProgress,
                     autoPlay: false,
@@ -277,6 +277,43 @@ class TrackPlayer {
                 this.setCurrentQuality(quality);
             }
         }).catch(voidCallback);
+    }
+
+    /**
+     * 插件就绪后补取当前歌曲的播放源与歌词。
+     * 首屏渲染不再等待插件加载，setup() 里的取源/取词对远程歌曲必然失败，
+     * 插件加载完成后调用本方法补一次（已有音源/用户已切歌/本地源则跳过取源，歌词缺失仍补取）。
+     * @param autoPlay 补取成功后是否立即播放（用户点播放触发时为 true）
+     */
+    public async restoreCurrentMusicIfNeeded(autoPlay = false) {
+        const currentMusic = this.currentMusic;
+        if (!currentMusic) {
+            return;
+        }
+        if (!this.audioController.hasSource) {
+            const quality =
+                getUserPreference("currentQuality") ||
+                AppConfig.getConfig("playMusic.defaultQuality");
+            try {
+                const { mediaSource, quality: realQuality } = await this.fetchMediaSource(
+                    currentMusic,
+                    quality,
+                );
+                // 期间用户可能已切歌或已取到其他源
+                if (mediaSource?.url && this.isCurrentMusic(currentMusic) && !this.audioController.hasSource) {
+                    this.setTrack(mediaSource, currentMusic, {
+                        seekTo: getUserPreference("currentProgress"),
+                        autoPlay,
+                    });
+                    this.setCurrentQuality(realQuality);
+                }
+            } catch {
+                /* 取源失败保持无音源状态，用户点播放时会再次触发补取 */
+            }
+        }
+        if (!this.lyric?.parser) {
+            this.fetchCurrentLyric(true);
+        }
     }
 
 
@@ -308,7 +345,8 @@ class TrackPlayer {
         index = (index + this.musicQueue.length) % this.musicQueue.length;
 
         // 2. same media
-        if (this.currentIndex === index && this.isCurrentMusic(this.musicQueue[index]) && !refreshSource) {
+        // 无音源时（启动取源失败/插件未就绪）不能走同曲重启分支，需落到下方重新取源
+        if (this.currentIndex === index && this.isCurrentMusic(this.musicQueue[index]) && !refreshSource && this.audioController.hasSource) {
             if (restartOnSameMedia) {
                 this.seekTo(0);
             }
@@ -449,6 +487,11 @@ class TrackPlayer {
     }
 
     public resume() {
+        if (!this.audioController.hasSource) {
+            // 启动取源失败（如插件未就绪）后用户点播放：补取并自动播放
+            void this.restoreCurrentMusicIfNeeded(true);
+            return;
+        }
         this.audioController.play();
 
         if (this.playerState !== this.audioController.playerState) {
@@ -572,7 +615,7 @@ class TrackPlayer {
         const currentMusic = this.currentMusic;
         if (currentMusic && quality !== this.currentQuality) {
             const { mediaSource, quality: realQuality } = await this.fetchMediaSource(currentMusic, quality);
-            if (this.isCurrentMusic(currentMusic)) {
+            if (mediaSource?.url && this.isCurrentMusic(currentMusic)) {
                 this.setTrack(mediaSource, currentMusic, {
                     seekTo: this.progress.currentTime ?? 0,
                     autoPlay: this.playerState === PlayerState.Playing,
@@ -784,6 +827,11 @@ class TrackPlayer {
     private setTrack(mediaSource: IPlugin.IMediaSourceResult, musicItem: IMusic.IMusicItem, options: ITrackOptions = {
         autoPlay: true,
     }) {
+        // 取源失败时不要进入 setTrackSource：它会先写入 audioController.musicItem，
+        // 使后续“插件就绪后补取音源”误判为已有音源
+        if (!mediaSource?.url) {
+            return;
+        }
         this.resetProgress();
         this.audioController.setTrackSource(mediaSource, musicItem);
 

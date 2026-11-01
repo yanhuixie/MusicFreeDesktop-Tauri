@@ -3,10 +3,11 @@ import NoPlugin from "@/renderer/components/NoPlugin";
 import { Tab } from "@headlessui/react";
 import { useNavigate } from "react-router-dom";
 import Body from "./components/Body";
-import PluginManager from "@shared/plugin-manager/renderer";
+import { useSortedSupportedPlugin } from "@shared/plugin-manager/renderer";
 
 export default function RecommendSheetsView() {
-    const availablePlugins = PluginManager.getSortedSupportedPlugin("getRecommendSheetsByTag");
+    // 订阅式读取：插件在后台加载完成时自动刷新，避免停留在 NoPlugin 空态
+    const availablePlugins = useSortedSupportedPlugin("getRecommendSheetsByTag");
     const navigate = useNavigate();
 
     return (

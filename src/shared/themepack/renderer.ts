@@ -18,6 +18,35 @@ const currentThemePackStore = new Store<ICommon.IThemePack | null>(null);
 
 const themeNodeId = "themepack-node";
 const themePathKey = "themepack-path";
+/** 上次主题的背景色：index.html 内联脚本据此预热首屏底色，避免深色主题启动闪白 */
+const themeBgKey = "themepack-bg";
+
+/** 记录当前主题生效后的背景色（供下次启动首屏预热） */
+function cacheThemeBackground() {
+    try {
+        // 优先取实际绘制背景的 body 计算色；主题只改 --backgroundColor 时回退到变量值
+        let bg = getComputedStyle(document.body).backgroundColor;
+        if (!bg || bg === "rgba(0, 0, 0, 0)" || bg === "transparent") {
+            bg = getComputedStyle(document.documentElement)
+                .getPropertyValue("--backgroundColor")
+                .trim();
+        }
+        if (bg) {
+            localStorage.setItem(themeBgKey, bg);
+        } else {
+            localStorage.removeItem(themeBgKey);
+        }
+    } catch {
+        /* 读取失败则沿用上次记录 */
+    }
+}
+
+/** 清除 index.html 注入的首屏底色内联覆盖，让主题样式表接管 */
+function clearBootBackground() {
+    const style = document.documentElement.style;
+    style.removeProperty("--boot-bg");
+    style.removeProperty("--backgroundColor");
+}
 
 const validIframeMap = new Map<
     "app" | "header" | "body" | "music-bar" | "side-bar" | "page",
@@ -49,12 +78,17 @@ async function applyTheme(themePack: ICommon.IThemePack | null) {
             }
         });
         localStorage.removeItem(themePathKey);
+        localStorage.removeItem(themeBgKey);
+        clearBootBackground();
     } else {
         const rawStyle = await invoke<string>("theme_read_file", {
             themePackPath: themePack.path,
             relativePath: "index.css",
         });
         themeNode.innerHTML = replaceAlias(rawStyle, themePack.path);
+        // 先移除首屏内联覆盖，再由主题样式接管并按实际生效色更新缓存
+        clearBootBackground();
+        cacheThemeBackground();
 
         if (themePack.iframe) {
             validIframeMap.forEach(async (_value, key) => {
@@ -149,7 +183,9 @@ async function setupThemePacks() {
         });
 
     } catch {
-    // pass
+        // 主题读取失败（如主题目录被外部删除）：清除首屏底色覆盖与缓存，避免卡在旧主题色
+        clearBootBackground();
+        localStorage.removeItem(themeBgKey);
     }
 }
 

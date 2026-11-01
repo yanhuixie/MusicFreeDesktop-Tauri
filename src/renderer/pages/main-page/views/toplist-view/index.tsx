@@ -12,10 +12,11 @@ import Empty from "@/renderer/components/Empty";
 import { useTranslation } from "react-i18next";
 
 import "./index.scss";
-import PluginManager from "@shared/plugin-manager/renderer";
+import { useSortedSupportedPlugin } from "@shared/plugin-manager/renderer";
 
 export default function ToplistView() {
-    const availablePlugins = PluginManager.getSortedSupportedPlugin("getTopLists");
+    // 订阅式读取：插件在后台加载完成时自动刷新，避免停留在 NoPlugin 空态
+    const availablePlugins = useSortedSupportedPlugin("getTopLists");
     const navigate = useNavigate();
     const { t } = useTranslation();
 

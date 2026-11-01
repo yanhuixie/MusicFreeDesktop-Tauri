@@ -60,6 +60,10 @@ window.addEventListener("message", (evt: MessageEvent) => {
         }
     } else if (data.type === "load-plugins") {
         void handleLoadPlugins(data);
+    } else if (data.type === "load-plugin") {
+        void handleLoadPlugin(data);
+    } else if (data.type === "unload-plugin") {
+        void handleUnloadPlugin(data);
     } else if (data.type === "try-load-plugin") {
         void handleTryLoadPlugin(data);
     } else if (data.type === "call-method") {
@@ -313,7 +317,7 @@ function safeSerialize(value: any): any {
     }
 }
 
-function instanceMeta(entry: LoadedPluginEntry, code: string) {
+function instanceMeta(entry: LoadedPluginEntry, code: string, providedHash?: string) {
     const instance = entry.instance;
     const supportedMethod: string[] = [];
     const meta: any = {};
@@ -329,7 +333,8 @@ function instanceMeta(entry: LoadedPluginEntry, code: string) {
         }
     }
     return {
-        hash: instance.platform ? sha256(code).toString() : "",
+        // 主 frame 已算过 hash 时直接复用，避免对全量插件代码重复 SHA256
+        hash: instance.platform ? providedHash || sha256(code).toString() : "",
         platform: instance.platform ?? "",
         stateCode: entry.stateCode,
         error: entry.error,
@@ -342,14 +347,17 @@ async function handleLoadPlugins(data: IpcMessage) {
     const { plugins, env } = data.payload || {};
     envSnapshot = env || {};
     const results: any[] = [];
-    loadedPlugins.clear();
-    for (const { code } of plugins || []) {
+    // 合并语义：只覆盖/新增本次传入的插件，不清空已加载实例，
+    // 避免安装/更新期间并发的方法调用命中空表
+    for (const { code, hash } of plugins || []) {
         const entry = loadOnePlugin(code);
-        const meta = instanceMeta(entry, code);
+        const meta = instanceMeta(entry, code, hash);
         if (meta.hash) {
             loadedPlugins.set(meta.hash, entry);
         }
         results.push(meta);
+        // iframe 与主 frame 同线程：逐个插件之间让出主线程，避免批量执行造成长卡顿
+        await new Promise((resolve) => setTimeout(resolve, 0));
     }
     parent.postMessage({
         __musicfree_plugin: true,
@@ -360,8 +368,42 @@ async function handleLoadPlugins(data: IpcMessage) {
     } satisfies IpcMessage, "*");
 }
 
-/** 试加载（安装校验用）：仅解析并返回 meta，不改动 loadedPlugins，
- *  避免 load-plugins 的 clear 中间态清空已装插件 */
+/** 懒加载单个插件（清单命中时首次调用）：只写入不清理其他已加载实例 */
+async function handleLoadPlugin(data: IpcMessage) {
+    const { code, hash, env } = data.payload || {};
+    if (env) {
+        envSnapshot = env;
+    }
+    const entry = loadOnePlugin(code);
+    const meta = instanceMeta(entry, code, hash);
+    if (meta.hash) {
+        loadedPlugins.set(meta.hash, entry);
+    }
+    parent.postMessage({
+        __musicfree_plugin: true,
+        type: "rpc-response",
+        id: data.id,
+        ok: true,
+        result: !!meta.hash,
+    } satisfies IpcMessage, "*");
+}
+
+/** 卸载插件：移除 iframe 内实例，停止其模块级定时器/监听的后续引用 */
+async function handleUnloadPlugin(data: IpcMessage) {
+    const { hash } = data.payload || {};
+    if (hash) {
+        loadedPlugins.delete(hash);
+    }
+    parent.postMessage({
+        __musicfree_plugin: true,
+        type: "rpc-response",
+        id: data.id,
+        ok: true,
+        result: true,
+    } satisfies IpcMessage, "*");
+}
+
+/** 试加载（安装校验用）：仅解析并返回 meta，不写入 loadedPlugins */
 async function handleTryLoadPlugin(data: IpcMessage) {
     const { plugins, env } = data.payload || {};
     if (env) {
