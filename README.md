@@ -32,6 +32,15 @@
 
 [飞书云文档](https://r0rvr854dd1.feishu.cn/drive/folder/IrVEfD67KlWZGkdqwjecLHFNnBb?from=from_copylink)
 
+## 关于本仓库（Tauri v2 移植版）
+
+本仓库是 [maotoumao/MusicFreeDesktop](https://github.com/maotoumao/MusicFreeDesktop) 的 Tauri v2 移植版，自 2026-10 起在 master 原地推进：
+
+- 原 Electron（electron-forge + webpack）构建链路已全量移除，替换为 **Tauri v2（Rust 后端 + WebView2）+ Vite 多入口** 单一构建链路；
+- 前端（React）代码保持原架构，系统层能力（音频播放、托盘、任务栏缩略图工具栏、系统媒体传输控制 SMTC、插件网络代理等）由 `src-tauri/src/` 下的 Rust 模块实现；
+- 插件协议与安卓版 / 原桌面版完全一致，现有 MusicFree 插件可直接使用；
+- 移植目前以 Windows 为主要验证平台（依赖 WebView2），macOS / Linux 尚未验证。
+
 ## 特性
 
 - 插件化：本软件仅仅是一个播放器，本身**并不集成**任何平台的任何音源，所有的搜索、播放、歌单导入等功能全部基于**插件**。这也就意味着，**只要可以在互联网上搜索到的音源，只要有对应的插件，你都可以使用本软件进行搜索、播放等功能。** 关于插件的详细说明请参考 [安卓版 Readme 的插件部分](https://github.com/maotoumao/MusicFree#%E6%8F%92%E4%BB%B6)。
@@ -144,12 +153,20 @@ config.json 是一个配置文件。
 
 ## 启动项目
 
-下载仓库代码之后，在根目录下执行：
+下载仓库代码之后，在根目录下执行（前置要求：Node.js 与 Rust 工具链 cargo）：
 
 ```bash
 npm install
-npm start
+npm run tauri dev
 ```
+
+`tauri dev` 会自动启动 Vite dev server 并拉起桌面应用。构建发布包：
+
+```bash
+npm run tauri build
+```
+
+其他常用命令：仅构建前端 `npm run build:vite`；类型检查 `npx tsc --noEmit`；代码检查 `npm run lint`。
 
 ## 支持这个项目
 
