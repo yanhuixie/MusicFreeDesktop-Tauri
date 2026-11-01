@@ -189,15 +189,12 @@ pub fn init(app: &AppHandle) {
 
 /// 播放状态变化入口（message_bus sync 时调用）
 pub fn update_on_state_change(app: &AppHandle) {
-    let playing = crate::message_bus::get_app_state(app)
-        .get("playerState")
-        .and_then(|v| v.as_str())
-        .map(|s| s == "Playing")
-        .unwrap_or(false);
+    let playing = crate::message_bus::player_state_name(app) == "Playing";
     let state = app.state::<Mutex<ThumbbarState>>();
     let changed = state.lock().map(|g| g.playing != playing).unwrap_or(false);
     drop(state);
     if changed {
+        log::info!("thumbar 播放状态切换: playing={playing}");
         apply_buttons(app, playing);
     }
 }

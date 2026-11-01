@@ -48,6 +48,20 @@ pub fn get_app_state(app: &AppHandle) -> Value {
     value
 }
 
+/// 播放状态名。前端 PlayerState 为数字枚举（constant.ts：None=0/Playing=1/Paused=2），
+/// JSON 上报即数字；兼容字符串形式以便人工排查。
+pub fn player_state_name(app: &AppHandle) -> String {
+    match get_app_state(app).get("playerState") {
+        Some(Value::Number(n)) => match n.as_i64() {
+            Some(1) => "Playing".into(),
+            Some(2) => "Paused".into(),
+            _ => "None".into(),
+        },
+        Some(Value::String(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
 /// 供托盘等 Rust 模块向主窗口下发命令（对应 Electron 版 messageBus.sendCommand）
 pub fn send_command(app: &AppHandle, command: &str, data: Value) {
     if let Some(win) = app.get_webview_window("main") {

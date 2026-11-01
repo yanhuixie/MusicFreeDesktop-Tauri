@@ -84,7 +84,7 @@ fn menu_item(app: &AppHandle, id: &str, label: &str, enabled: bool) -> Option<Me
 pub fn rebuild_if_needed(app: &AppHandle) {
     let app_state = crate::message_bus::get_app_state(app);
     let music_item = app_state.get("musicItem").cloned().unwrap_or(Value::Null);
-    let player_state = app_state.get("playerState").and_then(|v| v.as_str()).unwrap_or("");
+    let player_state = crate::message_bus::player_state_name(app);
     let repeat_mode = app_state.get("repeatMode").and_then(|v| v.as_str()).unwrap_or("loop");
     let lyric_text = app_state.get("lyricText").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -153,7 +153,7 @@ pub fn rebuild_if_needed(app: &AppHandle) {
     };
     let submenu = match (
         mk_radio("repeat-loop", text_of(&guard, "media.music_repeat_mode_loop"), repeat_mode == "loop"),
-        mk_radio("repeat-queue", text_of(&guard, "media.music_repeat_mode_queue"), repeat_mode == "queue"),
+        mk_radio("repeat-queue", text_of(&guard, "media.music_repeat_mode_queue"), repeat_mode == "queue-repeat"),
         mk_radio("repeat-shuffle", text_of(&guard, "media.music_repeat_mode_shuffle"), repeat_mode == "shuffle"),
     ) {
         (Some(a), Some(b), Some(c)) => SubmenuBuilder::new(app, text_of(&guard, "media.music_repeat_mode"))
