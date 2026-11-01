@@ -132,6 +132,31 @@ function clearDefaultBehavior() {
     };
 
     document.addEventListener("keydown", killSpaceBar, false);
+
+    // Tauri 迁移：WebView2 默认右键菜单全开（Electron 引擎本身不弹，见 wry default_context_menus），
+    // 此处全局禁用；文本类可编辑元素放行以保留原生复制/粘贴菜单，对齐 Electron 行为。
+    // 用捕获阶段保证先于任何 stopPropagation 执行，且不影响 React onContextMenu 自绘菜单。
+    document.addEventListener(
+        "contextmenu",
+        (evt) => {
+            if (!isEditableTarget(evt.target)) {
+                evt.preventDefault();
+            }
+        },
+        true,
+    );
+}
+
+/** 文本输入类元素（原生编辑菜单仍可用） */
+function isEditableTarget(target: EventTarget | null): boolean {
+    const node = target as HTMLElement | null;
+    if (!node?.tagName) return false;
+    if (node.isContentEditable || node.tagName === "TEXTAREA") return true;
+    if (node.tagName === "INPUT") {
+        const type = (node as HTMLInputElement).type || "text";
+        return ["text", "search", "password", "email", "url", "tel", "number"].includes(type);
+    }
+    return false;
 }
 
 
